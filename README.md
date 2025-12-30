@@ -6,7 +6,7 @@ A collection of toy projects and experiments created to learn and explore variou
 
 ### [WindSim](./WindSim)
 A 3D wind simulation project implemented in C++ and built using the Zig toolchain. 32^3 grid resolution took under 1 seconds to simulate on CPU.
-This project also demonstrates using **Zig** to seamlessly interop with **C** (Raylib) and **C++** (Physics Engine) libraries.
+This project also demonstrates using **Zig** to seamlessly interop with **C** (Raylib) for Visualization and **C++** for Physics Engine.
 
 ![windsim](docs/windsim.gif)
 
