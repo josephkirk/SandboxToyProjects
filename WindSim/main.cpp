@@ -35,8 +35,7 @@ int main() {
 
   Camera3D camera = {0};
   camera.position = (Vector3){60.0f, 60.0f, 60.0f};
-  camera.target =
-      (Vector3){currentRes / 2.0f, currentRes / 2.0f, currentRes / 2.0f};
+  camera.target = (Vector3){0.0f, 0.0f, 0.0f};
   camera.up = (Vector3){0.0f, 1.0f, 0.0f};
   camera.fovy = 45.0f;
   camera.projection = CAMERA_PERSPECTIVE;
@@ -55,14 +54,80 @@ int main() {
     if (IsKeyPressed(KEY_LEFT_BRACKET)) {
       if (currentRes > 16)
         InitSim(currentRes - 16);
-      camera.target =
-          (Vector3){currentRes / 2.0f, currentRes / 2.0f, currentRes / 2.0f};
+      camera.target = (Vector3){0.0f, 0.0f, 0.0f};
     }
     if (IsKeyPressed(KEY_RIGHT_BRACKET)) {
       if (currentRes < 128)
         InitSim(currentRes + 16);
-      camera.target =
-          (Vector3){currentRes / 2.0f, currentRes / 2.0f, currentRes / 2.0f};
+      camera.target = (Vector3){0.0f, 0.0f, 0.0f};
+    }
+
+    // --- Camera Controls (Maya Style) ---
+    if (IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT)) {
+      Vector2 delta = GetMouseDelta();
+      float mouseWheel = GetMouseWheelMove();
+
+      // Alt + Right Mouse OR Mouse Wheel: Zoom
+      if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT) || mouseWheel != 0.0f) {
+        float zoomFactor = 0.0f;
+        if (mouseWheel != 0.0f) {
+          zoomFactor = mouseWheel * 2.0f;
+        } else {
+          zoomFactor = -delta.x * 0.1f + delta.y * 0.1f;
+        }
+
+        Vector3 forward = Vector3Subtract(camera.target, camera.position);
+        float dist = Vector3Length(forward);
+
+        // Prevent getting too close or flipping
+        if (dist > 1.0f || zoomFactor < 0.0f) {
+          Vector3 move = Vector3Scale(Vector3Normalize(forward), zoomFactor);
+          camera.position = Vector3Add(camera.position, move);
+        }
+      }
+      // Alt + Middle Mouse: Pan
+      else if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE)) {
+        Vector3 forward =
+            Vector3Normalize(Vector3Subtract(camera.target, camera.position));
+        Vector3 right = Vector3CrossProduct(forward, camera.up);
+        Vector3 up = camera.up; // Or re-calculate local up if needed
+
+        float panSpeed =
+            0.05f * Vector3Distance(camera.position, camera.target) * 0.05f;
+
+        Vector3 moveX = Vector3Scale(right, -delta.x * panSpeed);
+        Vector3 moveY = Vector3Scale(up, delta.y * panSpeed);
+
+        Vector3 move = Vector3Add(moveX, moveY);
+        camera.position = Vector3Add(camera.position, move);
+        camera.target = Vector3Add(camera.target, move);
+      }
+      // Alt + Left Mouse: Orbit
+      else if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        Vector3 sub = Vector3Subtract(camera.position, camera.target);
+
+        // Rotate Yaw (around global Y)
+        Matrix rotYaw = MatrixRotate((Vector3){0, 1, 0}, -delta.x * 0.005f);
+        sub = Vector3Transform(sub, rotYaw);
+
+        // Rotate Pitch (around local Right)
+        Vector3 right = Vector3CrossProduct(Vector3Normalize(sub), camera.up);
+        right.y = 0;
+        right = Vector3Normalize(right);
+        Matrix rotPitch = MatrixRotate(right, -delta.y * 0.005f);
+        sub = Vector3Transform(sub, rotPitch);
+
+        camera.position = Vector3Add(camera.target, sub);
+      }
+    } else {
+      // Scroll Zoom
+      float mouseWheel = GetMouseWheelMove();
+      if (mouseWheel != 0.0f) {
+        Vector3 forward = Vector3Subtract(camera.target, camera.position);
+        Vector3 move =
+            Vector3Scale(Vector3Normalize(forward), mouseWheel * 2.0f);
+        camera.position = Vector3Add(camera.position, move);
+      }
     }
 
     // --- Vector Scaling ---
@@ -83,9 +148,7 @@ int main() {
 
     if (IsKeyPressed(KEY_N)) { // New Radial
       visualVolumes.push_back(
-          {WindSim::WindVolume::CreateRadial(
-               {currentRes / 2.0f, currentRes / 2.0f, currentRes / 2.0f}, 10.0f,
-               120.0f),
+          {WindSim::WindVolume::CreateRadial({0.0f, 0.0f, 0.0f}, 10.0f, 120.0f),
            false, DARKBLUE});
       if (selectedIdx >= 0)
         visualVolumes[selectedIdx].selected = false;
@@ -94,11 +157,10 @@ int main() {
     }
 
     if (IsKeyPressed(KEY_B)) { // New Box (Directional)
-      visualVolumes.push_back(
-          {WindSim::WindVolume::CreateDirectional(
-               {currentRes / 2.0f, currentRes / 2.0f, currentRes / 2.0f},
-               {8.0f, 8.0f, 8.0f}, {1.0f, 0.0f, 0.0f}, 150.0f),
-           false, MAROON});
+      visualVolumes.push_back({WindSim::WindVolume::CreateDirectional(
+                                   {0.0f, 0.0f, 0.0f}, {8.0f, 8.0f, 8.0f},
+                                   {1.0f, 0.0f, 0.0f}, 150.0f),
+                               false, MAROON});
       if (selectedIdx >= 0)
         visualVolumes[selectedIdx].selected = false;
       selectedIdx = visualVolumes.size() - 1;
@@ -111,6 +173,8 @@ int main() {
     }
 
     // --- Transformation & Rotation ---
+    // (Existing transform logic assumes 'v.volume' is modified directly, which
+    // is World Space now. Correct.)
     if (selectedIdx >= 0) {
       VisualVolume &v = visualVolumes[selectedIdx];
       float moveSpeed = 40.0f * frameDt;
@@ -164,9 +228,17 @@ int main() {
     }
 
     // --- Simulation ---
+    // Transform World Space volumes to Sim Space (0..res)
     std::vector<WindSim::WindVolume> simVolumes;
-    for (const auto &vv : visualVolumes)
-      simVolumes.push_back(vv.volume);
+    float halfRes = currentRes * 0.5f;
+    for (const auto &vv : visualVolumes) {
+      WindSim::WindVolume sv = vv.volume;
+      sv.position.x += halfRes;
+      sv.position.y += halfRes;
+      sv.position.z += halfRes;
+      simVolumes.push_back(sv);
+    }
+
     double simStartTime = GetTime();
     windSim->applyForces(dt, simVolumes);
     windSim->step(dt);
@@ -176,11 +248,13 @@ int main() {
     BeginDrawing();
     ClearBackground(RAYWHITE);
     BeginMode3D(camera);
+    // Grid matches Sim Resolution but centered
     DrawGrid(currentRes, cellSize);
 
     const WindSim::Vec4 *vData =
         (const WindSim::Vec4 *)windSim->getVelocityData();
     int renderStep = (currentRes > 48) ? 4 : 2;
+    float offset = currentRes * 0.5f;
     for (int z = 0; z < currentRes; z += renderStep) {
       for (int y = 0; y < currentRes; y += renderStep) {
         for (int x = 0; x < currentRes; x += renderStep) {
@@ -188,9 +262,11 @@ int main() {
           WindSim::Vec4 v = vData[idx];
           float len = v.length3();
           if (len > 0.1f) {
-            Vector3 start = {(float)x, (float)y, (float)z};
-            Vector3 end = {x + v.x * vectorScale, y + v.y * vectorScale,
-                           z + v.z * vectorScale};
+            Vector3 start = {(float)x - offset, (float)y - offset,
+                             (float)z - offset};
+            Vector3 end = {start.x + v.x * vectorScale,
+                           start.y + v.y * vectorScale,
+                           start.z + v.z * vectorScale};
             DrawLine3D(start, end, Fade(BLUE, std::min(1.0f, len * 0.1f)));
           }
         }
