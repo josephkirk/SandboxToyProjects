@@ -222,7 +222,8 @@ int main() {
     DrawText(TextFormat("Total: %.2f ms | Sim: %.2f ms",
                         GetFrameTime() * 1000.0f, simTimeMs),
              screenWidth - 250, 10, 20, DARKGRAY);
-    DrawText(TextFormat("Res: %d^3 | Volumes: %d | Scale: %.1f", currentRes,
+    DrawText(TextFormat("Res: %d^3 | SIMD: %s | Volumes: %d | Scale: %.1f",
+                        currentRes, windSim->getSIMDName(),
                         (int)visualVolumes.size(), vectorScale),
              10, 10, 20, DARKGRAY);
     DrawText("Grid Size: [ ] | Vector Scale: O P | TAB Selection | N/B Add | "
