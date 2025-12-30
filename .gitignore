@@ -1,0 +1,15 @@
+# Zig artifacts
+zig-out/
+.zig-cache/
+
+# Executables
+*.exe
+*.pdb
+*.obj
+
+# IDEs
+.vscode/
+.vs/
+*.sln
+*.vcxproj
+*.user
