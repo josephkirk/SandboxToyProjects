@@ -248,13 +248,39 @@ public:
           int startZ = bz * BLOCK_SIZE;
           int endZ = std::min(startZ + BLOCK_SIZE, depth);
 
-          float thresholdSq = 1e-4f * 1e-4f;
+          // Increased threshold to 0.05 to aggressively cull "invisible" wind
+          float thresholdSq = 0.05f * 0.05f;
 
-          // Sparse sampling or full check? Full check for correctness first.
+#if defined(WINDSIM_USE_AVX2)
+          __m256 vThreshold = _mm256_set1_ps(thresholdSq);
+#endif
+
           for (int z = startZ; z < endZ; ++z) {
             for (int y = startY; y < endY; ++y) {
               int baseIdx = width * (y + height * z);
-              for (int x = startX; x < endX; ++x) {
+              int x = startX;
+
+#if defined(WINDSIM_USE_AVX2)
+              for (; x <= endX - 8; x += 8) {
+                int cellIdx = baseIdx + x;
+                __m256 vvx = _mm256_loadu_ps(&vx[cellIdx]);
+                __m256 vvy = _mm256_loadu_ps(&vy[cellIdx]);
+                __m256 vvz = _mm256_loadu_ps(&vz[cellIdx]);
+
+                __m256 vMagSq =
+                    _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(vvx, vvx),
+                                                _mm256_mul_ps(vvy, vvy)),
+                                  _mm256_mul_ps(vvz, vvz));
+
+                __m256 vCmp = _mm256_cmp_ps(vMagSq, vThreshold, _CMP_GT_OQ);
+                if (_mm256_movemask_ps(vCmp) != 0) {
+                  hasVelocity = true;
+                  goto block_active;
+                }
+              }
+#endif
+              // Scalar tail
+              for (; x < endX; ++x) {
                 int cellIdx = baseIdx + x;
                 float vSq = vx[cellIdx] * vx[cellIdx] +
                             vy[cellIdx] * vy[cellIdx] +
@@ -390,6 +416,7 @@ private:
   }
 
   void advect(float dt) {
+    const float damping = 0.99f;
 #pragma omp parallel for collapse(3)
     for (int bz = 0; bz < blocksZ; ++bz) {
       for (int by = 0; by < blocksY; ++by) {
@@ -413,6 +440,10 @@ private:
           int loopSX = std::max(1, startX);
           int loopEX = std::min(endX, width - 1);
 
+#if defined(WINDSIM_USE_AVX2)
+          __m256 vDamping = _mm256_set1_ps(damping);
+#endif
+
           for (int z = loopSZ; z < loopEZ; ++z) {
             for (int y = loopSY; y < loopEY; ++y) {
               int baseIdx = width * (y + height * z);
@@ -429,11 +460,17 @@ private:
                   sampleVelocity((x + i) - dt * vxPrev[ii], y - dt * vyPrev[ii],
                                  z - dt * vzPrev[ii], svx[i], svy[i], svz[i]);
                 }
-                for (int i = 0; i < 8; ++i) {
-                  vx[idx + i] = svx[i];
-                  vy[idx + i] = svy[i];
-                  vz[idx + i] = svz[i];
-                }
+                __m256 v_svx = _mm256_loadu_ps(svx);
+                __m256 v_svy = _mm256_loadu_ps(svy);
+                __m256 v_svz = _mm256_loadu_ps(svz);
+
+                v_svx = _mm256_mul_ps(v_svx, vDamping);
+                v_svy = _mm256_mul_ps(v_svy, vDamping);
+                v_svz = _mm256_mul_ps(v_svz, vDamping);
+
+                _mm256_storeu_ps(&vx[idx], v_svx);
+                _mm256_storeu_ps(&vy[idx], v_svy);
+                _mm256_storeu_ps(&vz[idx], v_svz);
               }
 #endif
               for (; x < loopEX; ++x) {
@@ -441,9 +478,9 @@ private:
                 float svx, svy, svz;
                 sampleVelocity(x - dt * vxPrev[idx], y - dt * vyPrev[idx],
                                z - dt * vzPrev[idx], svx, svy, svz);
-                vx[idx] = svx;
-                vy[idx] = svy;
-                vz[idx] = svz;
+                vx[idx] = svx * damping;
+                vy[idx] = svy * damping;
+                vz[idx] = svz * damping;
               }
             }
           }

@@ -17,13 +17,13 @@ pub fn build(b: *std.Build) void {
     exe.addIncludePath(b.path(b.pathJoin(&.{ raylib_path, "include" })));
     exe.addLibraryPath(b.path(b.pathJoin(&.{ raylib_path, "lib" })));
     exe.linkSystemLibrary("raylib");
-    
+
     // Link C library explicitly
     exe.linkLibC();
     exe.linkLibCpp();
-    
+
     // Add C header path for the shim import
-    exe.addIncludePath(b.path("."));
+    exe.addIncludePath(b.path("libs"));
 
     // Windows system libraries for Raylib
     exe.linkSystemLibrary("winmm");
@@ -33,7 +33,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("opengl32");
 
     exe.addCSourceFile(.{
-        .file = b.path("windsim_shim.cpp"),
+        .file = b.path("libs/windsim_shim.cpp"),
         .flags = &.{
             "-std=c++20",
             "-mavx2",

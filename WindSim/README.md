@@ -17,7 +17,9 @@ We use a custom Axis-Aligned Bounding Box (AABB) Tree to efficiently detect whic
 ### 3. Velocity Persistence
 To prevent wind from "freezing" when a volume moves away, we implement a second activation pass.
 - **Pass 2 (Persist)**: We scan inactive blocks for lingering velocity.
-- **Threshold**: If any cell in a block has `|v| > 1e-4`, the block remains **Active** until the velocity dissipates naturally.
+- **Threshold**: If any cell in a block has `|v| > 0.05`, the block remains **Active**.
+- **Optimization**: This check is fully vectorized using AVX2 (checking 8 cells at once) for minimal overhead.
+- **Damping**: Velocity is damped (`0.99`) over time to ensure wind dissipates and blocks eventually deactivate.
 
 ## Performance Architectures
 

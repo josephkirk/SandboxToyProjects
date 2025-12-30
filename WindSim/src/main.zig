@@ -101,18 +101,18 @@ pub fn main() !void {
                 const up = camera.up;
 
                 const panSpeed = 0.05 * c.Vector3Distance(camera.position, camera.target) * 0.05;
-                
+
                 const moveX = c.Vector3Scale(right, -delta.x * panSpeed);
                 const moveY = c.Vector3Scale(up, delta.y * panSpeed);
                 const move = c.Vector3Add(moveX, moveY);
-                
+
                 camera.position = c.Vector3Add(camera.position, move);
                 camera.target = c.Vector3Add(camera.target, move);
             }
             // Alt + Left Mouse: Orbit
             else if (c.IsMouseButtonDown(c.MOUSE_BUTTON_LEFT)) {
                 var sub = c.Vector3Subtract(camera.position, camera.target);
-                
+
                 // Yaw
                 const rotYaw = c.MatrixRotate(.{ .x = 0, .y = 1, .z = 0 }, -delta.x * 0.005);
                 sub = c.Vector3Transform(sub, rotYaw);
@@ -146,7 +146,7 @@ pub fn main() !void {
         }
 
         if (c.IsKeyPressed(c.KEY_N)) { // New Radial
-             var v = VisualVolume{
+            var v = VisualVolume{
                 .volume = undefined,
                 .selected = false,
                 .color = c.DARKBLUE,
@@ -167,7 +167,7 @@ pub fn main() !void {
         }
 
         if (c.IsKeyPressed(c.KEY_B)) { // New Box (Directional)
-             var v = VisualVolume{
+            var v = VisualVolume{
                 .volume = undefined,
                 .selected = false,
                 .color = c.MAROON,
@@ -210,7 +210,7 @@ pub fn main() !void {
             if (c.IsKeyDown(c.KEY_G)) v.volume.rotation.y -= rotSpeed;
             if (c.IsKeyDown(c.KEY_Y)) v.volume.rotation.z += rotSpeed;
             if (c.IsKeyDown(c.KEY_H)) v.volume.rotation.z -= rotSpeed;
-            
+
             // Resize
             if (c.IsKeyDown(c.KEY_KP_ADD) or c.IsKeyDown(c.KEY_EQUAL)) {
                 v.volume.sizeParams.x += moveSpeed * 0.5;
@@ -231,7 +231,7 @@ pub fn main() !void {
         // --- Simulation ---
         var simVolumes = std.ArrayListUnmanaged(c.WindVolume_C){};
         defer simVolumes.deinit(allocator);
-        
+
         const halfRes = @as(f32, @floatFromInt(currentRes)) * 0.5;
         for (visualVolumes.items) |vv| {
             var sv = vv.volume;
@@ -266,20 +266,12 @@ pub fn main() !void {
                     const idx = x + currentRes * (y + currentRes * z);
                     const v = vData[@intCast(idx)];
                     // Manually calculate length since C struct doesn't have methods
-                    const len = std.math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+                    const len = std.math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
 
-                    if (len > 0.1) {
-                         const start = c.Vector3{ 
-                             .x = @as(f32, @floatFromInt(x)) - offset, 
-                             .y = @as(f32, @floatFromInt(y)) - offset, 
-                             .z = @as(f32, @floatFromInt(z)) - offset 
-                         };
-                         const end = c.Vector3{
-                             .x = start.x + v.x * vectorScale,
-                             .y = start.y + v.y * vectorScale,
-                             .z = start.z + v.z * vectorScale
-                         };
-                         c.DrawLine3D(start, end, c.Fade(c.BLUE, @min(1.0, len * 0.1)));
+                    if (len > 0.05) {
+                        const start = c.Vector3{ .x = @as(f32, @floatFromInt(x)) - offset, .y = @as(f32, @floatFromInt(y)) - offset, .z = @as(f32, @floatFromInt(z)) - offset };
+                        const end = c.Vector3{ .x = start.x + v.x * vectorScale, .y = start.y + v.y * vectorScale, .z = start.z + v.z * vectorScale };
+                        c.DrawLine3D(start, end, c.Fade(c.BLUE, @min(1.0, len * 0.1)));
                     }
                 }
             }
@@ -293,14 +285,10 @@ pub fn main() !void {
                 c.DrawSphereWires(pos, vv.volume.sizeParams.x, 8, 8, color);
             } else {
                 c.DrawCubeWires(pos, vv.volume.sizeParams.x * 2.0, vv.volume.sizeParams.y * 2.0, vv.volume.sizeParams.z * 2.0, color);
-                
+
                 const rotDirC = c.WindSim_RotateDirection(vv.volume.direction, vv.volume.rotation);
-                
-                const arrowEnd = c.Vector3{
-                    .x = pos.x + rotDirC.x * 10,
-                    .y = pos.y + rotDirC.y * 10,
-                    .z = pos.z + rotDirC.z * 10
-                };
+
+                const arrowEnd = c.Vector3{ .x = pos.x + rotDirC.x * 10, .y = pos.y + rotDirC.y * 10, .z = pos.z + rotDirC.z * 10 };
                 c.DrawLine3D(pos, arrowEnd, c.MAGENTA);
                 c.DrawSphere(arrowEnd, 0.4, c.MAGENTA);
             }
@@ -309,18 +297,15 @@ pub fn main() !void {
 
         c.DrawText(c.TextFormat("Total: %.2f ms | Sim: %.2f ms", frameDt * 1000.0, simTimeMs), screenWidth - 250, 10, 20, c.DARKGRAY);
         c.DrawText(c.TextFormat("Res: %d^3 | SIMD: %s | Volumes: %d | Scale: %.1f", currentRes, c.WindSim_GetSIMDName(windSim), @as(c_int, @intCast(visualVolumes.items.len)), vectorScale), 10, 10, 20, c.DARKGRAY);
-        
+
         c.DrawText(c.TextFormat("Blocks: %d / %d Active", c.WindSim_GetActiveBlockCount(windSim), c.WindSim_GetTotalBlockCount(windSim)), 10, 35, 20, c.DARKGRAY);
 
         c.DrawText("Grid Size: [ ] | Vector Scale: O P | TAB Selection | N/B Add | DEL Remove", 10, screenHeight - 60, 18, c.GRAY);
         c.DrawText("Transform: Arrows/PgUp/PgDn Move | R/F, T/G, Y/H Rotate Wind | +/- Resize", 10, screenHeight - 35, 18, c.GRAY);
 
-
         if (selectedIdx >= 0) {
             const v = visualVolumes.items[@intCast(selectedIdx)].volume;
-             c.DrawText(c.TextFormat("SELECTED [%d]: pos(%.1f, %.1f, %.1f)", 
-                @as(c_int, @intCast(selectedIdx)), v.position.x, v.position.y, v.position.z), 
-             10, 95, 18, c.MAROON);
+            c.DrawText(c.TextFormat("SELECTED [%d]: pos(%.1f, %.1f, %.1f)", @as(c_int, @intCast(selectedIdx)), v.position.x, v.position.y, v.position.z), 10, 95, 18, c.MAROON);
         }
 
         c.EndDrawing();
