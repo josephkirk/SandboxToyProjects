@@ -12,6 +12,18 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const raylib_path = "../thirdparties/raylib-5.5_win64_msvc16";
+    exe.addIncludePath(b.path(b.pathJoin(&.{ raylib_path, "include" })));
+    exe.addLibraryPath(b.path(b.pathJoin(&.{ raylib_path, "lib" })));
+    exe.linkSystemLibrary("raylib");
+
+    // Windows system libraries for Raylib
+    exe.linkSystemLibrary("winmm");
+    exe.linkSystemLibrary("gdi32");
+    exe.linkSystemLibrary("user32");
+    exe.linkSystemLibrary("shell32");
+    exe.linkSystemLibrary("opengl32");
+
     exe.addCSourceFile(.{
         .file = b.path("main.cpp"),
         .flags = &.{
@@ -24,6 +36,13 @@ pub fn build(b: *std.Build) void {
     exe.linkLibCpp();
 
     b.installArtifact(exe);
+
+    // Copy raylib.dll to the output directory
+    const copy_dll = b.addInstallFile(
+        b.path(b.pathJoin(&.{ raylib_path, "lib", "raylib.dll" })),
+        "bin/raylib.dll",
+    );
+    b.getInstallStep().dependOn(&copy_dll.step);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());

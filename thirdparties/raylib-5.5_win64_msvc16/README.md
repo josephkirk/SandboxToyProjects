@@ -1,0 +1,1 @@
+- Raylib: Download from https://www.raylib.com/ and extract to thirdparties/raylib-5.5_win64_msvc16

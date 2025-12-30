@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <iostream>
 #include <memory>
 #include <vector>
 
@@ -23,13 +22,8 @@
 
 namespace WindSim {
 
-// -------------------------------------------------------------------------
-// Math & Types (Aligned for Vulkan/SIMD)
-// -------------------------------------------------------------------------
+static constexpr float WINDSIM_PI = 3.14159265359f;
 
-static constexpr float PI = 3.14159265359f;
-
-// Aligns to 16 bytes for std140/std430 layout compatibility in Vulkan
 struct alignas(16) Vec4 {
   float x, y, z, w;
 
@@ -65,26 +59,24 @@ struct IVec3 {
   int x, y, z;
 };
 
-// -------------------------------------------------------------------------
-// Wind Generator Volumes
-// -------------------------------------------------------------------------
-
-enum class VolumeType { Directional, Radial, Cone };
+enum class VolumeType { Directional, Radial };
 
 struct WindVolume {
   VolumeType type;
-  Vec4 position;   // Center for Radial/Cone, MinBounds for Directional
-  Vec4 direction;  // Direction for Cone/Directional (Normalized)
-  Vec4 sizeParams; // x=radius/width, y=height, z=angle(cos), w=falloff
+  Vec4 position;   // Center of the volume
+  Vec4 direction;  // Force direction (normalized)
+  Vec4 sizeParams; // Box: XYZ half-extents. Radial: X=Radius, W=Falloff.
+  Vec4 rotation;   // Euler angles in radians (X, Y, Z)
   float strength;
 
-  static WindVolume CreateDirectional(Vec4 minBounds, Vec4 maxBounds, Vec4 dir,
+  static WindVolume CreateDirectional(Vec4 center, Vec4 halfExtents, Vec4 dir,
                                       float strength) {
     WindVolume v;
     v.type = VolumeType::Directional;
-    v.position = minBounds;
-    v.sizeParams = maxBounds;
+    v.position = center;
+    v.sizeParams = halfExtents;
     v.direction = dir.normalized3();
+    v.rotation = {0, 0, 0, 0};
     v.strength = strength;
     return v;
   }
@@ -95,26 +87,12 @@ struct WindVolume {
     v.type = VolumeType::Radial;
     v.position = center;
     v.sizeParams = {radius, 0, 0, falloff};
-    v.strength = strength;
-    return v;
-  }
-
-  static WindVolume CreateCone(Vec4 apex, Vec4 dir, float length,
-                               float angleDeg, float strength) {
-    WindVolume v;
-    v.type = VolumeType::Cone;
-    v.position = apex;
-    v.direction = dir.normalized3();
-    float halfAngleRad = (angleDeg / 2.0f) * (PI / 180.0f);
-    v.sizeParams = {length, std::cos(halfAngleRad), 0, 0};
+    v.direction = {1, 0, 0, 0};
+    v.rotation = {0, 0, 0, 0};
     v.strength = strength;
     return v;
   }
 };
-
-// -------------------------------------------------------------------------
-// Solver Grid
-// -------------------------------------------------------------------------
 
 class WindGrid {
 private:
@@ -124,7 +102,6 @@ private:
 
   std::vector<Vec4> velocityField;
   std::vector<Vec4> velocityPrev;
-
   std::vector<float> pressureField;
   std::vector<float> divergenceField;
 
@@ -144,7 +121,29 @@ public:
   }
   IVec3 getDimensions() const { return {width, height, depth}; }
 
-  // Optimized Force Application
+  // Helper for rotating a direction vector (Forward rotation)
+  static Vec4 rotateDirection(const Vec4 &v, const Vec4 &euler) {
+    float sx = std::sin(euler.x), cx = std::cos(euler.x);
+    float sy = std::sin(euler.y), cy = std::cos(euler.y);
+    float sz = std::sin(euler.z), cz = std::cos(euler.z);
+
+    Vec4 res = v;
+    // Rotate X -> Y -> Z
+    float y1 = res.y * cx - res.z * sx;
+    float z1 = res.y * sx + res.z * cx;
+    res.y = y1;
+    res.z = z1;
+    float x2 = res.x * cy + res.z * sy;
+    float z2 = -res.x * sy + res.z * cy;
+    res.x = x2;
+    res.z = z2;
+    float x3 = res.x * cz - res.y * sz;
+    float y3 = res.x * sz + res.y * cz;
+    res.x = x3;
+    res.y = y3;
+    return res;
+  }
+
   void applyForces(float dt, const std::vector<WindVolume> &volumes) {
 #pragma omp parallel for
     for (int z = 0; z < depth; ++z) {
@@ -156,13 +155,14 @@ public:
 
           for (const auto &vol : volumes) {
             if (vol.type == VolumeType::Directional) {
-              if (worldPos.x >= vol.position.x &&
-                  worldPos.x <= vol.sizeParams.x &&
-                  worldPos.y >= vol.position.y &&
-                  worldPos.y <= vol.sizeParams.y &&
-                  worldPos.z >= vol.position.z &&
-                  worldPos.z <= vol.sizeParams.z) {
-                totalForce = totalForce + (vol.direction * vol.strength);
+              // Simple AABB check
+              Vec4 localPos = worldPos - vol.position;
+              if (std::abs(localPos.x) <= vol.sizeParams.x &&
+                  std::abs(localPos.y) <= vol.sizeParams.y &&
+                  std::abs(localPos.z) <= vol.sizeParams.z) {
+                // Apply rotated direction
+                Vec4 rotatedDir = rotateDirection(vol.direction, vol.rotation);
+                totalForce = totalForce + (rotatedDir * vol.strength);
               }
             } else if (vol.type == VolumeType::Radial) {
               Vec4 diff = worldPos - vol.position;
@@ -174,45 +174,17 @@ public:
                 totalForce =
                     totalForce + (diff.normalized3() * (vol.strength * factor));
               }
-            } else if (vol.type == VolumeType::Cone) {
-              Vec4 diff = worldPos - vol.position;
-              float distSq = diff.lengthSq3();
-              if (distSq < vol.sizeParams.x * vol.sizeParams.x &&
-                  distSq > 0.00001f) {
-                float dist = std::sqrt(distSq);
-                Vec4 dirToPt = diff * (1.0f / dist); // Fast normalize
-                float dot = dirToPt.dot3(vol.direction);
-                if (dot > vol.sizeParams.y) {
-                  float factor =
-                      (dot - vol.sizeParams.y) / (1.0f - vol.sizeParams.y);
-                  totalForce =
-                      totalForce + (vol.direction * (vol.strength * factor));
-                }
-              }
             }
           }
-
-          // FMA optimization potential
           velocityField[idx] = velocityField[idx] + (totalForce * dt);
         }
       }
     }
   }
 
-  // Optimized Step Function
-  // Removed explicit diffusion (air viscosity is negligible for games)
-  // Removed double projection
-  // Reduced default iterations to 8
   void step(float dt, int iterations = 8) {
-    // 1. Prepare for Advection: Copy current field (with forces) to Prev
     std::copy(velocityField.begin(), velocityField.end(), velocityPrev.begin());
-
-    // 2. Advect: Move Velocity along Velocity (Self-Advection)
-    // Reads from Prev, Writes to Field
     advect(dt);
-
-    // 3. Project: Enforce Divergence-Free (Incompressible)
-    // Operates in-place on Field
     project(iterations);
   }
 
@@ -222,47 +194,27 @@ private:
   }
 
   Vec4 sampleVelocity(float x, float y, float z) const {
-    // Fast clamp
     float fx = std::max(0.0f, std::min(x, (float)width - 1.001f));
     float fy = std::max(0.0f, std::min(y, (float)height - 1.001f));
     float fz = std::max(0.0f, std::min(z, (float)depth - 1.001f));
 
-    int i0 = (int)fx;
-    int i1 = i0 + 1;
-    int j0 = (int)fy;
-    int j1 = j0 + 1;
-    int k0 = (int)fz;
-    int k1 = k0 + 1;
+    int i0 = (int)fx, i1 = i0 + 1;
+    int j0 = (int)fy, j1 = j0 + 1;
+    int k0 = (int)fz, k1 = k0 + 1;
 
-    float s1 = fx - i0;
-    float s0 = 1.0f - s1;
-    float t1 = fy - j0;
-    float t0 = 1.0f - t1;
-    float u1 = fz - k0;
-    float u0 = 1.0f - u1;
+    float s1 = fx - i0, s0 = 1.0f - s1;
+    float t1 = fy - j0, t0 = 1.0f - t1;
+    float u1 = fz - k0, u0 = 1.0f - u1;
 
-    int slice0 = width * (height * k0);
-    int slice1 = width * (height * k1);
-    int row0 = width * j0;
-    int row1 = width * j1;
-
-    int idx000 = i0 + row0 + slice0;
-    int idx100 = i1 + row0 + slice0;
-    int idx010 = i0 + row1 + slice0;
-    int idx110 = i1 + row1 + slice0;
-    int idx001 = i0 + row0 + slice1;
-    int idx101 = i1 + row0 + slice1;
-    int idx011 = i0 + row1 + slice1;
-    int idx111 = i1 + row1 + slice1;
+    int slice0 = width * (height * k0), slice1 = width * (height * k1);
+    int row0 = width * j0, row1 = width * j1;
 
     const Vec4 *v = velocityPrev.data();
-
-    // Direct pointer access for speed
-    return ((v[idx000] * s0 + v[idx100] * s1) * t0 +
-            (v[idx010] * s0 + v[idx110] * s1) * t1) *
+    return ((v[i0 + row0 + slice0] * s0 + v[i1 + row0 + slice0] * s1) * t0 +
+            (v[i0 + row1 + slice0] * s0 + v[i1 + row1 + slice0] * s1) * t1) *
                u0 +
-           ((v[idx001] * s0 + v[idx101] * s1) * t0 +
-            (v[idx011] * s0 + v[idx111] * s1) * t1) *
+           ((v[i0 + row0 + slice1] * s0 + v[i1 + row0 + slice1] * s1) * t0 +
+            (v[i0 + row1 + slice1] * s0 + v[i1 + row1 + slice1] * s1) * t1) *
                u1;
   }
 
@@ -272,13 +224,9 @@ private:
       for (int y = 1; y < height - 1; ++y) {
         for (int x = 1; x < width - 1; ++x) {
           int idx = index(x, y, z);
-          const Vec4 &v = velocityPrev[idx]; // Advect along previous velocity
-
-          float backX = x - dt * v.x;
-          float backY = y - dt * v.y;
-          float backZ = z - dt * v.z;
-
-          velocityField[idx] = sampleVelocity(backX, backY, backZ);
+          const Vec4 &v = velocityPrev[idx];
+          velocityField[idx] =
+              sampleVelocity(x - dt * v.x, y - dt * v.y, z - dt * v.z);
         }
       }
     }
@@ -287,28 +235,17 @@ private:
 
   void project(int iter) {
     float h = cellSize;
-
-    // Precompute scalar optimization
-    float halfH = 0.5f * h;
-
-// 1. Calculate Divergence & Init Pressure
-// Using pointer arithmetic to avoid index mul in inner loop
 #pragma omp parallel for
     for (int z = 1; z < depth - 1; ++z) {
       for (int y = 1; y < height - 1; ++y) {
         float *divRow = &divergenceField[index(0, y, z)];
         float *pRow = &pressureField[index(0, y, z)];
         const Vec4 *vRow = &velocityField[index(0, y, z)];
-
-        int strideY = width;
-        int strideZ = width * height;
-
+        int sy = width, sz = width * height;
         for (int x = 1; x < width - 1; ++x) {
-          float div = vRow[x + 1].x - vRow[x - 1].x + vRow[x + strideY].y -
-                      vRow[x - strideY].y + vRow[x + strideZ].z -
-                      vRow[x - strideZ].z;
-
-          divRow[x] = -0.5f * div;
+          divRow[x] =
+              -0.5f * (vRow[x + 1].x - vRow[x - 1].x + vRow[x + sy].y -
+                       vRow[x - sy].y + vRow[x + sz].z - vRow[x - sz].z);
           pRow[x] = 0.0f;
         }
       }
@@ -316,60 +253,43 @@ private:
     setBoundsScalar(divergenceField);
     setBoundsScalar(pressureField);
 
-    // 2. Solve Pressure (Jacobi)
-    // Reduced default iterations from 20 -> 8
     for (int k = 0; k < iter; ++k) {
 #pragma omp parallel for
       for (int z = 1; z < depth - 1; ++z) {
         for (int y = 1; y < height - 1; ++y) {
           float *p = pressureField.data();
           const float *d = divergenceField.data();
-
 #if defined(WINDSIM_USE_AVX2)
-          int x = 1;
-          int endX = width - 1;
-          __m256 six = _mm256_set1_ps(6.0f);
-          __m256 rcpSix = _mm256_div_ps(_mm256_set1_ps(1.0f),
-                                        six); // multiply is faster than div
-
+          int x = 1, endX = width - 1;
+          __m256 rcpSix = _mm256_set1_ps(1.0f / 6.0f);
           for (; x <= endX - 8; x += 8) {
-            int idx = index(x, y, z);
-            int offY = width;
-            int offZ = width * height;
-
-            __m256 p_left = _mm256_loadu_ps(&p[idx - 1]);
-            __m256 p_right = _mm256_loadu_ps(&p[idx + 1]);
-            __m256 p_up = _mm256_loadu_ps(&p[idx - offY]);
-            __m256 p_down = _mm256_loadu_ps(&p[idx + offY]);
-            __m256 p_back = _mm256_loadu_ps(&p[idx - offZ]);
-            __m256 p_front = _mm256_loadu_ps(&p[idx + offZ]);
-            __m256 div_val = _mm256_loadu_ps(&d[idx]);
-
-            __m256 sum = _mm256_add_ps(p_left, p_right);
-            sum = _mm256_add_ps(sum, p_up);
-            sum = _mm256_add_ps(sum, p_down);
-            sum = _mm256_add_ps(sum, p_back);
-            sum = _mm256_add_ps(sum, p_front);
-            sum = _mm256_add_ps(sum, div_val);
-
-            // Note: Writing back to same array (Jacobi requires double buffer
-            // usually) But for game fluids, Gauss-Seidel style in-place
-            // converges faster even if dependent on order.
-            _mm256_storeu_ps(&p[idx], _mm256_mul_ps(sum, rcpSix));
+            int idx = index(x, y, z), oy = width, oz = width * height;
+            __m256 sum =
+                _mm256_add_ps(_mm256_add_ps(_mm256_loadu_ps(&p[idx - 1]),
+                                            _mm256_loadu_ps(&p[idx + 1])),
+                              _mm256_add_ps(_mm256_loadu_ps(&p[idx - oy]),
+                                            _mm256_loadu_ps(&p[idx + oy])));
+            sum = _mm256_add_ps(sum,
+                                _mm256_add_ps(_mm256_loadu_ps(&p[idx - oz]),
+                                              _mm256_loadu_ps(&p[idx + oz])));
+            _mm256_storeu_ps(
+                &p[idx],
+                _mm256_mul_ps(_mm256_add_ps(sum, _mm256_loadu_ps(&d[idx])),
+                              rcpSix));
           }
           for (; x < endX; ++x) {
             int idx = index(x, y, z);
-            p[idx] = (d[idx] + p[index(x - 1, y, z)] + p[index(x + 1, y, z)] +
-                      p[index(x, y - 1, z)] + p[index(x, y + 1, z)] +
-                      p[index(x, y, z - 1)] + p[index(x, y, z + 1)]) /
+            p[idx] = (d[idx] + p[idx - 1] + p[idx + 1] + p[idx - width] +
+                      p[idx + width] + p[idx - width * height] +
+                      p[idx + width * height]) /
                      6.0f;
           }
 #else
           for (int x = 1; x < width - 1; ++x) {
             int idx = index(x, y, z);
-            p[idx] = (d[idx] + p[index(x - 1, y, z)] + p[index(x + 1, y, z)] +
-                      p[index(x, y - 1, z)] + p[index(x, y + 1, z)] +
-                      p[index(x, y, z - 1)] + p[index(x, y, z + 1)]) /
+            p[idx] = (d[idx] + p[idx - 1] + p[idx + 1] + p[idx - width] +
+                      p[idx + width] + p[idx - width * height] +
+                      p[idx + width * height]) /
                      6.0f;
           }
 #endif
@@ -378,24 +298,16 @@ private:
       setBoundsScalar(pressureField);
     }
 
-// 3. Subtract Gradient
 #pragma omp parallel for
     for (int z = 1; z < depth - 1; ++z) {
       for (int y = 1; y < height - 1; ++y) {
-        // Pointers for inner loop
         const float *pRow = &pressureField[index(0, y, z)];
         Vec4 *vRow = &velocityField[index(0, y, z)];
-        int strideY = width;
-        int strideZ = width * height;
-
+        int sy = width, sz = width * height;
         for (int x = 1; x < width - 1; ++x) {
-          float p_x = pRow[x + 1] - pRow[x - 1];
-          float p_y = pRow[x + strideY] - pRow[x - strideY];
-          float p_z = pRow[x + strideZ] - pRow[x - strideZ];
-
-          vRow[x].x -= 0.5f * p_x;
-          vRow[x].y -= 0.5f * p_y;
-          vRow[x].z -= 0.5f * p_z;
+          vRow[x].x -= 0.5f * (pRow[x + 1] - pRow[x - 1]);
+          vRow[x].y -= 0.5f * (pRow[x + sy] - pRow[x - sy]);
+          vRow[x].z -= 0.5f * (pRow[x + sz] - pRow[x - sz]);
         }
       }
     }
@@ -403,60 +315,48 @@ private:
   }
 
   void setBounds() {
-    int strideZ = width * height;
-
-    // Z Faces
+    int sz = width * height;
     for (int y = 0; y < height; ++y) {
       for (int x = 0; x < width; ++x) {
-        velocityField[x + width * y + strideZ * 0] = {0, 0, 0, 0};
-        velocityField[x + width * y + strideZ * (depth - 1)] = {0, 0, 0, 0};
+        velocityField[x + width * y] = {0, 0, 0, 0};
+        velocityField[x + width * y + sz * (depth - 1)] = {0, 0, 0, 0};
       }
     }
-
-    // Y Faces
     for (int z = 0; z < depth; ++z) {
       for (int x = 0; x < width; ++x) {
-        velocityField[x + width * 0 + strideZ * z] = {0, 0, 0, 0};
-        velocityField[x + width * (height - 1) + strideZ * z] = {0, 0, 0, 0};
+        velocityField[x + sz * z] = {0, 0, 0, 0};
+        velocityField[x + width * (height - 1) + sz * z] = {0, 0, 0, 0};
       }
     }
-
-    // X Faces
     for (int z = 0; z < depth; ++z) {
       for (int y = 0; y < height; ++y) {
-        velocityField[0 + width * y + strideZ * z] = {0, 0, 0, 0};
-        velocityField[(width - 1) + width * y + strideZ * z] = {0, 0, 0, 0};
+        velocityField[width * y + sz * z] = {0, 0, 0, 0};
+        velocityField[(width - 1) + width * y + sz * z] = {0, 0, 0, 0};
       }
     }
   }
 
   void setBoundsScalar(std::vector<float> &f) {
-    int strideZ = width * height;
-
-    // Z Faces (Mirror neighbors)
+    int sz = width * height;
     for (int y = 0; y < height; ++y) {
       for (int x = 0; x < width; ++x) {
-        f[x + width * y + strideZ * 0] = f[x + width * y + strideZ * 1];
-        f[x + width * y + strideZ * (depth - 1)] =
-            f[x + width * y + strideZ * (depth - 2)];
+        f[x + width * y] = f[x + width * y + sz];
+        f[x + width * y + sz * (depth - 1)] =
+            f[x + width * y + sz * (depth - 2)];
       }
     }
-
-    // Y Faces
     for (int z = 0; z < depth; ++z) {
       for (int x = 0; x < width; ++x) {
-        f[x + width * 0 + strideZ * z] = f[x + width * 1 + strideZ * z];
-        f[x + width * (height - 1) + strideZ * z] =
-            f[x + width * (height - 2) + strideZ * z];
+        f[x + sz * z] = f[x + width + sz * z];
+        f[x + width * (height - 1) + sz * z] =
+            f[x + width * (height - 2) + sz * z];
       }
     }
-
-    // X Faces
     for (int z = 0; z < depth; ++z) {
       for (int y = 0; y < height; ++y) {
-        f[0 + width * y + strideZ * z] = f[1 + width * y + strideZ * z];
-        f[(width - 1) + width * y + strideZ * z] =
-            f[(width - 2) + width * y + strideZ * z];
+        f[width * y + sz * z] = f[1 + width * y + sz * z];
+        f[(width - 1) + width * y + sz * z] =
+            f[(width - 2) + width * y + sz * z];
       }
     }
   }
