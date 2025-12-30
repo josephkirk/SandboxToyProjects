@@ -7,7 +7,6 @@
 #include <memory>
 #include <vector>
 
-
 // Check for SIMD support
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -404,23 +403,62 @@ private:
   }
 
   void setBounds() {
-    // Simple closed box boundary
-    // Optimization: Only iterate faces instead of full checks inside volume
-    // Z Faces
-    int zStart = 0;
-    int zEnd = depth - 1;
     int strideZ = width * height;
+
+    // Z Faces
     for (int y = 0; y < height; ++y) {
       for (int x = 0; x < width; ++x) {
-        velocityField[x + width * y + strideZ * zStart] = {0, 0, 0, 0};
-        velocityField[x + width * y + strideZ * zEnd] = {0, 0, 0, 0};
+        velocityField[x + width * y + strideZ * 0] = {0, 0, 0, 0};
+        velocityField[x + width * y + strideZ * (depth - 1)] = {0, 0, 0, 0};
       }
     }
-    // X and Y faces omitted for brevity but follow same pattern
+
+    // Y Faces
+    for (int z = 0; z < depth; ++z) {
+      for (int x = 0; x < width; ++x) {
+        velocityField[x + width * 0 + strideZ * z] = {0, 0, 0, 0};
+        velocityField[x + width * (height - 1) + strideZ * z] = {0, 0, 0, 0};
+      }
+    }
+
+    // X Faces
+    for (int z = 0; z < depth; ++z) {
+      for (int y = 0; y < height; ++y) {
+        velocityField[0 + width * y + strideZ * z] = {0, 0, 0, 0};
+        velocityField[(width - 1) + width * y + strideZ * z] = {0, 0, 0, 0};
+      }
+    }
   }
 
   void setBoundsScalar(std::vector<float> &f) {
-    // Scalar boundary handling
+    int strideZ = width * height;
+
+    // Z Faces (Mirror neighbors)
+    for (int y = 0; y < height; ++y) {
+      for (int x = 0; x < width; ++x) {
+        f[x + width * y + strideZ * 0] = f[x + width * y + strideZ * 1];
+        f[x + width * y + strideZ * (depth - 1)] =
+            f[x + width * y + strideZ * (depth - 2)];
+      }
+    }
+
+    // Y Faces
+    for (int z = 0; z < depth; ++z) {
+      for (int x = 0; x < width; ++x) {
+        f[x + width * 0 + strideZ * z] = f[x + width * 1 + strideZ * z];
+        f[x + width * (height - 1) + strideZ * z] =
+            f[x + width * (height - 2) + strideZ * z];
+      }
+    }
+
+    // X Faces
+    for (int z = 0; z < depth; ++z) {
+      for (int y = 0; y < height; ++y) {
+        f[0 + width * y + strideZ * z] = f[1 + width * y + strideZ * z];
+        f[(width - 1) + width * y + strideZ * z] =
+            f[(width - 2) + width * y + strideZ * z];
+      }
+    }
   }
 };
 } // namespace WindSim
