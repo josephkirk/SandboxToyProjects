@@ -20,6 +20,8 @@
 #include <omp.h>
 #endif
 
+#include "aabbtree.hpp"
+
 namespace WindSim {
 
 static constexpr float WINDSIM_PI = 3.14159265359f;
@@ -91,6 +93,11 @@ private:
   int totalCells;
   float cellSize;
 
+  // Sparse Blocked Grid
+  static constexpr int BLOCK_SIZE = 16;
+  int blocksX, blocksY, blocksZ;
+  std::vector<uint8_t> activeBlocks; // 1 if active, 0 if inactive
+
   // SoA Layout for maximized SIMD throughput
   std::vector<float> vx, vy, vz;
   std::vector<float> vxPrev, vyPrev, vzPrev;
@@ -104,6 +111,13 @@ public:
   WindGrid(int w, int h, int d, float cell_size)
       : width(w), height(h), depth(d), cellSize(cell_size) {
     totalCells = width * height * depth;
+
+    // Initialize Blocks
+    blocksX = (width + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    blocksY = (height + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    blocksZ = (depth + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    activeBlocks.resize(blocksX * blocksY * blocksZ, 0);
+
     vx.assign(totalCells, 0.0f);
     vy.assign(totalCells, 0.0f);
     vz.assign(totalCells, 0.0f);
@@ -143,6 +157,17 @@ public:
 #endif
   }
 
+  int getActiveBlockCount() const {
+    int count = 0;
+    for (uint8_t active : activeBlocks) {
+      if (active)
+        count++;
+    }
+    return count;
+  }
+
+  int getTotalBlockCount() const { return (int)activeBlocks.size(); }
+
   static Vec4 rotateDirection(const Vec4 &v, const Vec4 &euler) {
     float sx = std::sin(euler.x), cx = std::cos(euler.x);
     float sy = std::sin(euler.y), cy = std::cos(euler.y);
@@ -163,54 +188,158 @@ public:
     return res;
   }
 
-  void applyForces(float dt, const std::vector<WindVolume> &volumes) {
-    if (volumes.empty())
-      return;
+  void updateActiveBlocks(const std::vector<WindVolume> &volumes) {
+    std::vector<aabb::AABB> volumeBoxes;
+    if (!volumes.empty()) {
+      volumeBoxes.reserve(volumes.size());
+      for (const auto &v : volumes) {
+        aabb::AABB b;
+        if (v.type == VolumeType::Directional) {
+          aabb::Vec3 c = {v.position.x, v.position.y, v.position.z};
+          aabb::Vec3 e = {v.sizeParams.x, v.sizeParams.y, v.sizeParams.z};
+          b.min = c - e;
+          b.max = c + e;
+        } else {
+          float r = v.sizeParams.x;
+          aabb::Vec3 c = {v.position.x, v.position.y, v.position.z};
+          aabb::Vec3 e = {r, r, r};
+          b.min = c - e;
+          b.max = c + e;
+        }
+        volumeBoxes.push_back(b);
+      }
+    }
 
-#pragma omp parallel for collapse(2)
-    for (int z = 0; z < depth; ++z) {
-      for (int y = 0; y < height; ++y) {
-        int baseIdx = width * (y + height * z);
-        float worldY = y * cellSize;
-        float worldZ = z * cellSize;
+    aabb::Tree tree;
+    tree.build(volumeBoxes);
 
-        for (int x = 0; x < width; ++x) {
-          int idx = baseIdx + x;
-          float worldX = x * cellSize;
-          float fx = 0, fy = 0, fz = 0;
+#pragma omp parallel for collapse(3)
+    for (int bz = 0; bz < blocksZ; ++bz) {
+      for (int by = 0; by < blocksY; ++by) {
+        for (int bx = 0; bx < blocksX; ++bx) {
+          int idx = bx + blocksX * (by + blocksY * bz);
 
-          for (const auto &vol : volumes) {
-            if (vol.type == VolumeType::Directional) {
-              float dx = std::abs(worldX - vol.position.x);
-              float dy = std::abs(worldY - vol.position.y);
-              float dz = std::abs(worldZ - vol.position.z);
-              if (dx <= vol.sizeParams.x && dy <= vol.sizeParams.y &&
-                  dz <= vol.sizeParams.z) {
-                Vec4 rDir = rotateDirection(vol.direction, vol.rotation);
-                fx += rDir.x * vol.strength;
-                fy += rDir.y * vol.strength;
-                fz += rDir.z * vol.strength;
-              }
-            } else if (vol.type == VolumeType::Radial) {
-              float rx = worldX - vol.position.x;
-              float ry = worldY - vol.position.y;
-              float rz = worldZ - vol.position.z;
-              float d2 = rx * rx + ry * ry + rz * rz;
-              float R2 = vol.sizeParams.x * vol.sizeParams.x;
-              if (d2 < R2) {
-                float dist = std::sqrt(d2);
-                float invDist = (dist > 1e-5f) ? (1.0f / dist) : 0.0f;
-                float falloff = 1.0f - (dist / vol.sizeParams.x);
-                float s = vol.strength * falloff * invDist;
-                fx += rx * s;
-                fy += ry * s;
-                fz += rz * s;
+          // Pass 1: Volume Overlap
+          if (!volumeBoxes.empty()) {
+            float minX = bx * BLOCK_SIZE * cellSize;
+            float minY = by * BLOCK_SIZE * cellSize;
+            float minZ = bz * BLOCK_SIZE * cellSize;
+            float maxX = minX + BLOCK_SIZE * cellSize;
+            float maxY = minY + BLOCK_SIZE * cellSize;
+            float maxZ = minZ + BLOCK_SIZE * cellSize;
+
+            aabb::AABB blockBox;
+            blockBox.min = {minX, minY, minZ};
+            blockBox.max = {maxX, maxY, maxZ};
+
+            if (tree.query_overlap(blockBox)) {
+              activeBlocks[idx] = 1;
+              continue;
+            }
+          }
+
+          // Pass 2: Velocity Persistence
+          // If not overlapped, check if we have lingering velocity
+          bool hasVelocity = false;
+          int startX = bx * BLOCK_SIZE;
+          int endX = std::min(startX + BLOCK_SIZE, width);
+          int startY = by * BLOCK_SIZE;
+          int endY = std::min(startY + BLOCK_SIZE, height);
+          int startZ = bz * BLOCK_SIZE;
+          int endZ = std::min(startZ + BLOCK_SIZE, depth);
+
+          float thresholdSq = 1e-4f * 1e-4f;
+
+          // Sparse sampling or full check? Full check for correctness first.
+          for (int z = startZ; z < endZ; ++z) {
+            for (int y = startY; y < endY; ++y) {
+              int baseIdx = width * (y + height * z);
+              for (int x = startX; x < endX; ++x) {
+                int cellIdx = baseIdx + x;
+                float vSq = vx[cellIdx] * vx[cellIdx] +
+                            vy[cellIdx] * vy[cellIdx] +
+                            vz[cellIdx] * vz[cellIdx];
+                if (vSq > thresholdSq) {
+                  hasVelocity = true;
+                  goto block_active;
+                }
               }
             }
           }
-          vx[idx] += fx * dt;
-          vy[idx] += fy * dt;
-          vz[idx] += fz * dt;
+
+        block_active:
+          activeBlocks[idx] = hasVelocity ? 1 : 0;
+        }
+      }
+    }
+  }
+
+  void applyForces(float dt, const std::vector<WindVolume> &volumes) {
+    updateActiveBlocks(volumes);
+    if (volumes.empty())
+      return;
+
+#pragma omp parallel for collapse(3)
+    for (int bz = 0; bz < blocksZ; ++bz) {
+      for (int by = 0; by < blocksY; ++by) {
+        for (int bx = 0; bx < blocksX; ++bx) {
+          int blockIdx = bx + blocksX * (by + blocksY * bz);
+          if (!activeBlocks[blockIdx])
+            continue;
+
+          int startX = bx * BLOCK_SIZE;
+          int endX = std::min(startX + BLOCK_SIZE, width);
+          int startY = by * BLOCK_SIZE;
+          int endY = std::min(startY + BLOCK_SIZE, height);
+          int startZ = bz * BLOCK_SIZE;
+          int endZ = std::min(startZ + BLOCK_SIZE, depth);
+
+          for (int z = startZ; z < endZ; ++z) {
+            for (int y = startY; y < endY; ++y) {
+              int baseIdx = width * (y + height * z);
+              float worldY = y * cellSize;
+              float worldZ = z * cellSize;
+
+              for (int x = startX; x < endX; ++x) {
+                int idx = baseIdx + x;
+                float worldX = x * cellSize;
+                float fx = 0, fy = 0, fz = 0;
+
+                for (const auto &vol : volumes) {
+                  if (vol.type == VolumeType::Directional) {
+                    float dx = std::abs(worldX - vol.position.x);
+                    float dy = std::abs(worldY - vol.position.y);
+                    float dz = std::abs(worldZ - vol.position.z);
+                    if (dx <= vol.sizeParams.x && dy <= vol.sizeParams.y &&
+                        dz <= vol.sizeParams.z) {
+                      Vec4 rDir = rotateDirection(vol.direction, vol.rotation);
+                      fx += rDir.x * vol.strength;
+                      fy += rDir.y * vol.strength;
+                      fz += rDir.z * vol.strength;
+                    }
+                  } else if (vol.type == VolumeType::Radial) {
+                    float rx = worldX - vol.position.x;
+                    float ry = worldY - vol.position.y;
+                    float rz = worldZ - vol.position.z;
+                    float d2 = rx * rx + ry * ry + rz * rz;
+                    float R2 = vol.sizeParams.x * vol.sizeParams.x;
+                    if (d2 < R2) {
+                      float dist = std::sqrt(d2);
+                      float invDist = (dist > 1e-5f) ? (1.0f / dist) : 0.0f;
+                      float falloff = 1.0f - (dist / vol.sizeParams.x);
+                      float s = vol.strength * falloff * invDist;
+                      fx += rx * s;
+                      fy += ry * s;
+                      fz += rz * s;
+                    }
+                  }
+                }
+                vx[idx] += fx * dt;
+                vy[idx] += fy * dt;
+                vz[idx] += fz * dt;
+              }
+            }
+          }
         }
       }
     }
@@ -261,36 +390,63 @@ private:
   }
 
   void advect(float dt) {
-#pragma omp parallel for collapse(2)
-    for (int z = 1; z < depth - 1; ++z) {
-      for (int y = 1; y < height - 1; ++y) {
-        int baseIdx = width * (y + height * z);
-        int x = 1;
+#pragma omp parallel for collapse(3)
+    for (int bz = 0; bz < blocksZ; ++bz) {
+      for (int by = 0; by < blocksY; ++by) {
+        for (int bx = 0; bx < blocksX; ++bx) {
+          int blockIdx = bx + blocksX * (by + blocksY * bz);
+          if (!activeBlocks[blockIdx])
+            continue;
+
+          int startX = bx * BLOCK_SIZE;
+          int endX = std::min(startX + BLOCK_SIZE, width);
+          int startY = by * BLOCK_SIZE;
+          int endY = std::min(startY + BLOCK_SIZE, height);
+          int startZ = bz * BLOCK_SIZE;
+          int endZ = std::min(startZ + BLOCK_SIZE, depth);
+
+          // Intersect with simulation bounds [1, dim - 1]
+          int loopSZ = std::max(1, startZ);
+          int loopEZ = std::min(endZ, depth - 1);
+          int loopSY = std::max(1, startY);
+          int loopEY = std::min(endY, height - 1);
+          int loopSX = std::max(1, startX);
+          int loopEX = std::min(endX, width - 1);
+
+          for (int z = loopSZ; z < loopEZ; ++z) {
+            for (int y = loopSY; y < loopEY; ++y) {
+              int baseIdx = width * (y + height * z);
+              int x = loopSX;
 #if defined(WINDSIM_USE_AVX2)
-        for (; x <= width - 9; x += 8) {
-          int idx = baseIdx + x;
-          float svx[8], svy[8], svz[8];
-          // Process 8 back-traces
-          for (int i = 0; i < 8; ++i) {
-            int ii = idx + i;
-            sampleVelocity((x + i) - dt * vxPrev[ii], y - dt * vyPrev[ii],
-                           z - dt * vzPrev[ii], svx[i], svy[i], svz[i]);
-          }
-          for (int i = 0; i < 8; ++i) {
-            vx[idx + i] = svx[i];
-            vy[idx + i] = svy[i];
-            vz[idx + i] = svz[i];
-          }
-        }
+              // Ensure we don't go out of bounds of the current BLOCK loop
+              // and the safe AVX buffer width (width-9)
+              int avxLimit = std::min(loopEX, width - 9);
+              for (; x <= avxLimit; x += 8) {
+                int idx = baseIdx + x;
+                float svx[8], svy[8], svz[8];
+                for (int i = 0; i < 8; ++i) {
+                  int ii = idx + i;
+                  sampleVelocity((x + i) - dt * vxPrev[ii], y - dt * vyPrev[ii],
+                                 z - dt * vzPrev[ii], svx[i], svy[i], svz[i]);
+                }
+                for (int i = 0; i < 8; ++i) {
+                  vx[idx + i] = svx[i];
+                  vy[idx + i] = svy[i];
+                  vz[idx + i] = svz[i];
+                }
+              }
 #endif
-        for (; x < width - 1; ++x) {
-          int idx = baseIdx + x;
-          float svx, svy, svz;
-          sampleVelocity(x - dt * vxPrev[idx], y - dt * vyPrev[idx],
-                         z - dt * vzPrev[idx], svx, svy, svz);
-          vx[idx] = svx;
-          vy[idx] = svy;
-          vz[idx] = svz;
+              for (; x < loopEX; ++x) {
+                int idx = baseIdx + x;
+                float svx, svy, svz;
+                sampleVelocity(x - dt * vxPrev[idx], y - dt * vyPrev[idx],
+                               z - dt * vzPrev[idx], svx, svy, svz);
+                vx[idx] = svx;
+                vy[idx] = svy;
+                vz[idx] = svz;
+              }
+            }
+          }
         }
       }
     }
@@ -298,6 +454,193 @@ private:
   }
 
   void project(int iter) {
+#pragma omp parallel for collapse(3)
+    for (int bz = 0; bz < blocksZ; ++bz) {
+      for (int by = 0; by < blocksY; ++by) {
+        for (int bx = 0; bx < blocksX; ++bx) {
+          int blockIdx = bx + blocksX * (by + blocksY * bz);
+          if (!activeBlocks[blockIdx])
+            continue;
+
+          int startX = bx * BLOCK_SIZE;
+          int endX = std::min(startX + BLOCK_SIZE, width);
+          int startY = by * BLOCK_SIZE;
+          int endY = std::min(startY + BLOCK_SIZE, height);
+          int startZ = bz * BLOCK_SIZE;
+          int endZ = std::min(startZ + BLOCK_SIZE, depth);
+
+          int loopSZ = std::max(1, startZ);
+          int loopEZ = std::min(endZ, depth - 1);
+          int loopSY = std::max(1, startY);
+          int loopEY = std::min(endY, height - 1);
+          int loopSX = std::max(1, startX);
+          int loopEX = std::min(endX, width - 1);
+
+          for (int z = loopSZ; z < loopEZ; ++z) {
+            for (int y = loopSY; y < loopEY; ++y) {
+              int baseIdx = width * (y + height * z);
+              int sy = width, sz = width * height;
+              int x = loopSX;
+#if defined(WINDSIM_USE_AVX2)
+              __m256 vHalf = _mm256_set1_ps(-0.5f);
+              __m256 vZero = _mm256_setzero_ps();
+              int avxLimit = std::min(loopEX, width - 9);
+              for (; x <= avxLimit; x += 8) {
+                int idx = baseIdx + x;
+                __m256 vx1 = _mm256_loadu_ps(&vx[idx + 1]);
+                __m256 vx0 = _mm256_loadu_ps(&vx[idx - 1]);
+                __m256 vy1 = _mm256_loadu_ps(&vy[idx + sy]);
+                __m256 vy0 = _mm256_loadu_ps(&vy[idx - sy]);
+                __m256 vz1 = _mm256_loadu_ps(&vz[idx + sz]);
+                __m256 vz0 = _mm256_loadu_ps(&vz[idx - sz]);
+                __m256 d =
+                    _mm256_add_ps(_mm256_sub_ps(vx1, vx0),
+                                  _mm256_add_ps(_mm256_sub_ps(vy1, vy0),
+                                                _mm256_sub_ps(vz1, vz0)));
+                _mm256_storeu_ps(&divergence[idx], _mm256_mul_ps(d, vHalf));
+                _mm256_storeu_ps(&pressure[idx], vZero);
+              }
+#endif
+              for (; x < loopEX; ++x) {
+                int idx = baseIdx + x;
+                divergence[idx] =
+                    -0.5f * (vx[idx + 1] - vx[idx - 1] + vy[idx + sy] -
+                             vy[idx - sy] + vz[idx + sz] - vz[idx - sz]);
+                pressure[idx] = 0.0f;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    setBoundsScalar(divergence);
+    setBoundsScalar(pressure);
+
+    float invSix = 1.0f / 6.0f;
+    for (int k = 0; k < iter; ++k) {
+      for (int rb = 0; rb < 2; ++rb) {
+#pragma omp parallel for collapse(3)
+        for (int bz = 0; bz < blocksZ; ++bz) {
+          for (int by = 0; by < blocksY; ++by) {
+            for (int bx = 0; bx < blocksX; ++bx) {
+              int blockIdx = bx + blocksX * (by + blocksY * bz);
+              if (!activeBlocks[blockIdx])
+                continue;
+
+              int startX = bx * BLOCK_SIZE;
+              int endX = std::min(startX + BLOCK_SIZE, width);
+              int startY = by * BLOCK_SIZE;
+              int endY = std::min(startY + BLOCK_SIZE, height);
+              int startZ = bz * BLOCK_SIZE;
+              int endZ = std::min(startZ + BLOCK_SIZE, depth);
+
+              int loopSZ = std::max(1, startZ);
+              int loopEZ = std::min(endZ, depth - 1);
+              int loopSY = std::max(1, startY);
+              int loopEY = std::min(endY, height - 1);
+              int loopSX = std::max(1, startX);
+              int loopEX = std::min(endX, width - 1);
+
+              for (int z = loopSZ; z < loopEZ; ++z) {
+                for (int y = loopSY; y < loopEY; ++y) {
+                  int sy = width, sz = width * height;
+                  int rowStartX = 1 + ((y + z + rb) % 2);
+                  // Adjust rowStartX to be within this block loop
+                  int x = std::max(loopSX, rowStartX);
+                  if ((x % 2) != (rowStartX % 2))
+                    x++;
+
+                  for (; x < loopEX; x += 2) {
+                    int idx = index(x, y, z);
+                    pressure[idx] = (divergence[idx] + pressure[idx - 1] +
+                                     pressure[idx + 1] + pressure[idx - sy] +
+                                     pressure[idx + sy] + pressure[idx - sz] +
+                                     pressure[idx + sz]) *
+                                    invSix;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      setBoundsScalar(pressure);
+    }
+
+#pragma omp parallel for collapse(3)
+    for (int bz = 0; bz < blocksZ; ++bz) {
+      for (int by = 0; by < blocksY; ++by) {
+        for (int bx = 0; bx < blocksX; ++bx) {
+          int blockIdx = bx + blocksX * (by + blocksY * bz);
+          if (!activeBlocks[blockIdx])
+            continue;
+
+          int startX = bx * BLOCK_SIZE;
+          int endX = std::min(startX + BLOCK_SIZE, width);
+          int startY = by * BLOCK_SIZE;
+          int endY = std::min(startY + BLOCK_SIZE, height);
+          int startZ = bz * BLOCK_SIZE;
+          int endZ = std::min(startZ + BLOCK_SIZE, depth);
+
+          int loopSZ = std::max(1, startZ);
+          int loopEZ = std::min(endZ, depth - 1);
+          int loopSY = std::max(1, startY);
+          int loopEY = std::min(endY, height - 1);
+          int loopSX = std::max(1, startX);
+          int loopEX = std::min(endX, width - 1);
+
+          for (int z = loopSZ; z < loopEZ; ++z) {
+            for (int y = loopSY; y < loopEY; ++y) {
+              int baseIdx = width * (y + height * z);
+              int sy = width, sz = width * height;
+              int x = loopSX;
+#if defined(WINDSIM_USE_AVX2)
+              __m256 vHalfSub = _mm256_set1_ps(0.5f);
+              int avxLimit = std::min(loopEX, width - 9);
+              for (; x <= avxLimit; x += 8) {
+                int idx = baseIdx + x;
+                __m256 p1x = _mm256_loadu_ps(&pressure[idx + 1]);
+                __m256 p0x = _mm256_loadu_ps(&pressure[idx - 1]);
+                __m256 p1y = _mm256_loadu_ps(&pressure[idx + sy]);
+                __m256 p0y = _mm256_loadu_ps(&pressure[idx - sy]);
+                __m256 p1z = _mm256_loadu_ps(&pressure[idx + sz]);
+                __m256 p0z = _mm256_loadu_ps(&pressure[idx - sz]);
+
+                _mm256_storeu_ps(
+                    &vx[idx],
+                    _mm256_sub_ps(
+                        _mm256_loadu_ps(&vx[idx]),
+                        _mm256_mul_ps(_mm256_sub_ps(p1x, p0x), vHalfSub)));
+
+                _mm256_storeu_ps(
+                    &vy[idx],
+                    _mm256_sub_ps(
+                        _mm256_loadu_ps(&vy[idx]),
+                        _mm256_mul_ps(_mm256_sub_ps(p1y, p0y), vHalfSub)));
+
+                _mm256_storeu_ps(
+                    &vz[idx],
+                    _mm256_sub_ps(
+                        _mm256_loadu_ps(&vz[idx]),
+                        _mm256_mul_ps(_mm256_sub_ps(p1z, p0z), vHalfSub)));
+              }
+#endif
+              for (; x < loopEX; ++x) {
+                int idx = baseIdx + x;
+                vx[idx] -= 0.5f * (pressure[idx + 1] - pressure[idx - 1]);
+                vy[idx] -= 0.5f * (pressure[idx + sy] - pressure[idx - sy]);
+                vz[idx] -= 0.5f * (pressure[idx + sz] - pressure[idx - sz]);
+              }
+            }
+          }
+        }
+      }
+    }
+    setBounds(vx, vy, vz);
+  }
+
+  void project_LEGACY(int iter) {
 #pragma omp parallel for collapse(2)
     for (int z = 1; z < depth - 1; ++z) {
       for (int y = 1; y < height - 1; ++y) {

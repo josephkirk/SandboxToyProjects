@@ -226,12 +226,16 @@ int main() {
                         currentRes, windSim->getSIMDName(),
                         (int)visualVolumes.size(), vectorScale),
              10, 10, 20, DARKGRAY);
+    DrawText(TextFormat("Blocks: %d / %d Active",
+                        windSim->getActiveBlockCount(),
+                        windSim->getTotalBlockCount()),
+             10, 35, 20, DARKGRAY);
     DrawText("Grid Size: [ ] | Vector Scale: O P | TAB Selection | N/B Add | "
              "DEL Remove",
-             10, 40, 18, GRAY);
+             10, screenHeight - 60, 18, GRAY);
     DrawText("Transform: Arrows/PgUp/PgDn Move | R/F, T/G, Y/H Rotate Wind | "
              "+/- Resize",
-             10, 65, 18, GRAY);
+             10, screenHeight - 35, 18, GRAY);
     if (selectedIdx >= 0) {
       const auto &v = visualVolumes[selectedIdx].volume;
       DrawText(
