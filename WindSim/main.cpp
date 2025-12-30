@@ -1,4 +1,4 @@
-#include "windsim.hpp"
+#include "WindSim.hpp"
 #include <chrono>
 #include <iomanip>
 #include <iostream>
@@ -54,11 +54,11 @@ int main() {
   std::vector<WindSim::WindVolume> volumes;
 
   // A directional wind blowing Right
-  //   volumes.push_back(WindSim::WindVolume::CreateDirectional(
-  //       {0, 0, 0}, {6, 6, 6}, // Bounds
-  //       {1.0f, 0.2f, 0.0f},   // Direction (Slightly Up-Right)
-  //       5.0f                  // Strength
-  //       ));
+  // volumes.push_back(WindSim::WindVolume::CreateDirectional(
+  //     {0, 0, 0}, {32, 32, 32}, // Bounds
+  //     {1.0f, 0.2f, 0.0f},      // Direction (Slightly Up-Right)
+  //     5.0f                     // Strength
+  // ));
 
   // A generic "explosion" or radial gust in the middle
   volumes.push_back(WindSim::WindVolume::CreateRadial({16, 16, 16}, // Center
@@ -69,14 +69,19 @@ int main() {
   // 3. Simulation Loop
   float dt = 0.1f;
   for (int i = 0; i < 20; ++i) {
+    if (i == 2) {
+      volumes.clear();
+    }
     // Apply wind sources
     windSim.applyForces(dt, volumes);
 
     // Solve Fluid Dynamics
     auto start = std::chrono::high_resolution_clock::now();
-    windSim.step(dt);
-    auto end = std::chrono::high_resolution_clock::now();
 
+    // Step with optimized defaults (8 iterations)
+    windSim.step(dt);
+
+    auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> ms = end - start;
 
     // Visualize center slice
@@ -86,7 +91,7 @@ int main() {
     }
 
     // --- Vulkan Interop Note ---
-    // At this point, you would map your Vulkan Storage Buffer:
+    // At this point, can would map  Vulkan Storage Buffer:
     // void* mappedData;
     // vkMapMemory(device, bufferMemory, 0, size, 0, &mappedData);
     // memcpy(mappedData, windSim.getVelocityData(),
