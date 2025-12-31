@@ -13,3 +13,8 @@ zig-out/
 *.sln
 *.vcxproj
 *.user
+
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock

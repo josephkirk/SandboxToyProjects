@@ -10,5 +10,13 @@ This project also demonstrates using **Zig** to seamlessly interop with **C** (R
 
 ![windsim](docs/windsim.gif)
 
+### [N-Body Simulation](./NBody)
+A high-performance gravitational N-body simulation using the **Barnes-Hut** algorithm. (main code is from https://github.com/DeadlockCode/barnes-hut , credit to the author)
+- **Simulation**: Written in **Rust**, parallelized with **Rayon** for high-throughput physics.
+- **Visualization**: Built in **Zig** with **Raylib**, using low-level **rlgl** calls for rendering 100k+ bodies at 144+ FPS.
+- **Interop**: Zig-Rust FFI with a thin C-compatible API.
+
+![nbody](docs/nbody.gif)
+
 ## Author
 Nguyen Phi Hung
