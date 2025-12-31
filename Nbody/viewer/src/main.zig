@@ -37,6 +37,8 @@ extern fn Simulation_GetNodes(handle: ?*const anyopaque) [*]const Node;
 extern fn Simulation_AddBody(handle: ?*anyopaque, x: f32, y: f32, vx: f32, vy: f32, mass: f32, radius: f32) void;
 extern fn Simulation_ApplyForce(handle: ?*anyopaque, x: f32, y: f32, fx: f32, fy: f32, radius: f32) void;
 extern fn Simulation_Reset(handle: ?*anyopaque, n: usize) void;
+extern fn Simulation_SetUseRayon(handle: ?*anyopaque, use_rayon: bool) void;
+extern fn Simulation_GetUseRayon(handle: ?*const anyopaque) bool;
 
 const SimState = struct {
     handle: ?*anyopaque,
@@ -206,6 +208,12 @@ pub fn main() !void {
             Simulation_Reset(state.handle, 1_000_000);
             state.mutex.unlock();
         }
+        if (c.IsKeyPressed(c.KEY_THREE)) {
+            state.mutex.lock();
+            const current = Simulation_GetUseRayon(state.handle);
+            Simulation_SetUseRayon(state.handle, !current);
+            state.mutex.unlock();
+        }
         const ray = c.GetMouseRay(c.GetMousePosition(), camera);
         const t = -ray.position.z / ray.direction.z;
         const world_mouse = c.Vector3Add(ray.position, c.Vector3Scale(ray.direction, t));
@@ -313,7 +321,11 @@ pub fn main() !void {
         c.DrawText(c.TextFormat("Bodies: %d", @as(c_int, @intCast(body_count))), 10, 10, 20, c.RAYWHITE);
         c.DrawText(c.TextFormat("Sim Time: %.2f ms", state.sim_time_ms), 10, 35, 20, c.RAYWHITE);
         c.DrawText(c.TextFormat("FPS: %d", c.GetFPS()), 10, 60, 20, c.RAYWHITE);
-        c.DrawText("Alt+Mouse: Cam | LMB: Force | RMB: Spawn | Q: Quadtree | 1: 100k | 2: 1M", 10, screenHeight - 30, 20, c.GRAY);
+        const use_rayon = Simulation_GetUseRayon(state.handle);
+        const scheduler_name = if (use_rayon) "Rayon" else "RustFiber";
+        c.DrawText(c.TextFormat("Scheduler: %s", scheduler_name.ptr), 10, 85, 20, if (use_rayon) c.ORANGE else c.GREEN);
+
+        c.DrawText("Alt+Mouse: Cam | LMB: Force | RMB: Spawn | Q: Quadtree | 1: 100k | 2: 1M | 3: Toggle Scheduler", 10, screenHeight - 30, 20, c.GRAY);
 
         c.EndDrawing();
     }

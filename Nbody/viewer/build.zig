@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("raylib");
 
     // Link Rust Simulation Library
-    const rust_lib_path = "../simulation/target/x86_64-pc-windows-gnu/release";
+    const rust_lib_path = "../simulation/target/release";
     exe.addLibraryPath(b.path(rust_lib_path));
     exe.linkSystemLibrary("nbody_simulation");
 
@@ -47,6 +47,12 @@ pub fn build(b: *std.Build) void {
         "bin/raylib.dll",
     );
     b.getInstallStep().dependOn(&copy_dll.step);
+
+    const copy_sim_dll = b.addInstallFile(
+        b.path(b.pathJoin(&.{ rust_lib_path, "nbody_simulation.dll" })),
+        "bin/nbody_simulation.dll",
+    );
+    b.getInstallStep().dependOn(&copy_sim_dll.step);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());

@@ -7,6 +7,7 @@ use crate::{
 use broccoli::aabb::Rect;
 use ultraviolet::Vec2;
 use rustfiber::{JobSystem, ParallelSliceMut};
+use rayon::prelude::*;
 
 use std::sync::Arc;
 
@@ -25,6 +26,8 @@ pub struct Simulation {
     pub quadtree: Quadtree,
     /// The JobSystem for parallel execution.
     pub job_system: Arc<JobSystem>,
+    /// Whether to use Rayon instead of RustFiber.
+    pub use_rayon: bool,
 }
 
 impl std::fmt::Debug for Simulation {
@@ -35,6 +38,7 @@ impl std::fmt::Debug for Simulation {
             .field("bodies", &self.bodies)
             .field("quadtree", &self.quadtree)
             .field("job_system", &"JobSystem")
+            .field("use_rayon", &self.use_rayon)
             .finish()
     }
 }
@@ -98,6 +102,7 @@ impl Simulation {
             bodies,
             quadtree,
             job_system,
+            use_rayon: false,
         }
     }
 
@@ -105,6 +110,11 @@ impl Simulation {
     pub fn reset(&mut self, n: usize) {
         self.bodies = crate::utils::uniform_disc(n);
         self.frame = 0;
+    }
+
+    /// Sets whether to use Rayon for parallelism.
+    pub fn set_use_rayon(&mut self, use_rayon: bool) {
+        self.use_rayon = use_rayon;
     }
 
     /// Advances the simulation by one step.
@@ -136,9 +146,15 @@ impl Simulation {
         let quadtree = &self.quadtree;
         
         // Use the new safe parallel iterator API
-        self.bodies.fiber_iter_mut(&self.job_system).for_each(move |body| {
-             body.acc = quadtree.acc(body.pos);
-        });
+        if self.use_rayon {
+             self.bodies.par_iter_mut().for_each(|body| {
+                  body.acc = quadtree.acc(body.pos);
+             });
+        } else {
+             self.bodies.fiber_iter_mut(&self.job_system).for_each(move |body| {
+                  body.acc = quadtree.acc(body.pos);
+             });
+        }
     }
 
     /// Updates the position and velocity of all bodies based on their current acceleration and time step.
@@ -146,9 +162,15 @@ impl Simulation {
         let dt = self.dt;
         // self.bodies.iter_mut().for_each(|body| body.update(dt)); // sequential fallback for comparison? no.
         
-        self.bodies.fiber_iter_mut(&self.job_system).for_each(move |body| {
-            body.update(dt);
-        });
+        if self.use_rayon {
+             self.bodies.par_iter_mut().for_each(|body| {
+                 body.update(dt);
+             });
+        } else {
+             self.bodies.fiber_iter_mut(&self.job_system).for_each(move |body| {
+                 body.update(dt);
+             });
+        }
     }
 
     /// Detects and resolves collisions between bodies.

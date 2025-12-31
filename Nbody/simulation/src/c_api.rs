@@ -33,6 +33,18 @@ pub unsafe extern "C" fn Simulation_Reset(handle: *mut Simulation, n: usize) {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn Simulation_SetUseRayon(handle: *mut Simulation, use_rayon: bool) {
+    if let Some(sim) = unsafe { handle.as_mut() } {
+        sim.set_use_rayon(use_rayon);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Simulation_GetUseRayon(handle: *const Simulation) -> bool {
+    unsafe { handle.as_ref() }.map_or(false, |sim| sim.use_rayon)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn Simulation_GetBodyCount(handle: *const Simulation) -> usize {
     unsafe { handle.as_ref() }.map_or(0, |sim| sim.bodies.len())
 }
