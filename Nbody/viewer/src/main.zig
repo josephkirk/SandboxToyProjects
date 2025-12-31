@@ -1,4 +1,5 @@
 const std = @import("std");
+const SimZig = @import("simulation_zig.zig");
 
 const c = @cImport({
     @cInclude("raylib.h");
@@ -6,26 +7,9 @@ const c = @cImport({
     @cInclude("rlgl.h");
 });
 
-const Body = extern struct {
-    pos: [2]f32,
-    vel: [2]f32,
-    acc: [2]f32,
-    mass: f32,
-    radius: f32,
-};
-
-const Quad = extern struct {
-    center: [2]f32,
-    size: f32,
-};
-
-const Node = extern struct {
-    children: usize,
-    next: usize,
-    pos: [2]f32,
-    mass: f32,
-    quad: Quad,
-};
+const Body = SimZig.Body;
+const Quad = SimZig.Quad;
+const Node = SimZig.Node;
 
 extern fn Simulation_Create() ?*anyopaque;
 extern fn Simulation_Destroy(handle: ?*anyopaque) void;
@@ -42,6 +26,9 @@ extern fn Simulation_GetUseRayon(handle: ?*const anyopaque) bool;
 
 const SimState = struct {
     handle: ?*anyopaque,
+    zig_sim: *SimZig.ZigSimulation,
+    use_zig: bool = false,
+
     mutex: std.Thread.Mutex = .{},
     running: bool = true,
 
@@ -58,16 +45,21 @@ const SimState = struct {
         const self = try allocator.create(SimState);
         self.* = .{
             .handle = Simulation_Create(),
+            .zig_sim = try SimZig.ZigSimulation.init(allocator),
             .render_bodies = try allocator.alloc(Body, 1_100_000), // Max support
             .render_nodes = try allocator.alloc(Node, 3_000_000), // Max support
             .allocator = allocator,
         };
+        // Initialize simulations with default 100k
+        Simulation_Reset(self.handle, 100_000);
+        self.zig_sim.reset(100_000);
         return self;
     }
 
     fn deinit(self: *SimState) void {
         self.running = false;
         Simulation_Destroy(self.handle);
+        self.zig_sim.deinit();
         self.allocator.free(self.render_bodies);
         self.allocator.free(self.render_nodes);
         self.allocator.destroy(self);
@@ -79,24 +71,47 @@ const SimState = struct {
             {
                 self.mutex.lock();
                 defer self.mutex.unlock();
-                Simulation_Step(self.handle);
 
-                self.body_count = Simulation_GetBodyCount(self.handle);
-                const bodies = Simulation_GetBodies(self.handle);
-                if (self.body_count > self.render_bodies.len) {
-                    self.allocator.free(self.render_bodies);
-                    // alloc or panic
-                    self.render_bodies = self.allocator.alloc(Body, self.body_count + 100_000) catch @panic("OOM");
-                }
-                @memcpy(self.render_bodies[0..self.body_count], bodies[0..self.body_count]);
+                if (self.use_zig) {
+                    self.zig_sim.step();
 
-                self.node_count = Simulation_GetNodeCount(self.handle);
-                const nodes = Simulation_GetNodes(self.handle);
-                if (self.node_count > self.render_nodes.len) {
-                    self.allocator.free(self.render_nodes);
-                    self.render_nodes = self.allocator.alloc(Node, self.node_count + 100_000) catch @panic("OOM");
+                    const bodies = self.zig_sim.bodies.items;
+                    self.body_count = bodies.len;
+
+                    if (self.body_count > self.render_bodies.len) {
+                        self.allocator.free(self.render_bodies);
+                        self.render_bodies = self.allocator.alloc(Body, self.body_count + 100_000) catch @panic("OOM");
+                    }
+                    @memcpy(self.render_bodies[0..self.body_count], bodies);
+
+                    // Zig Sim Nodes (Barnes-Hut)
+                    const nodes = self.zig_sim.quadtree.nodes.items;
+                    self.node_count = nodes.len;
+                    if (self.node_count > self.render_nodes.len) {
+                        self.allocator.free(self.render_nodes);
+                        self.render_nodes = self.allocator.alloc(Node, self.node_count + 100_000) catch @panic("OOM");
+                    }
+                    @memcpy(self.render_nodes[0..self.node_count], nodes);
+                } else {
+                    Simulation_Step(self.handle);
+
+                    self.body_count = Simulation_GetBodyCount(self.handle);
+                    const bodies = Simulation_GetBodies(self.handle);
+                    if (self.body_count > self.render_bodies.len) {
+                        self.allocator.free(self.render_bodies);
+                        // alloc or panic
+                        self.render_bodies = self.allocator.alloc(Body, self.body_count + 100_000) catch @panic("OOM");
+                    }
+                    @memcpy(self.render_bodies[0..self.body_count], bodies[0..self.body_count]);
+
+                    self.node_count = Simulation_GetNodeCount(self.handle);
+                    const nodes = Simulation_GetNodes(self.handle);
+                    if (self.node_count > self.render_nodes.len) {
+                        self.allocator.free(self.render_nodes);
+                        self.render_nodes = self.allocator.alloc(Node, self.node_count + 100_000) catch @panic("OOM");
+                    }
+                    @memcpy(self.render_nodes[0..self.node_count], nodes[0..self.node_count]);
                 }
-                @memcpy(self.render_nodes[0..self.node_count], nodes[0..self.node_count]);
             }
             const end = c.GetTime();
             self.sim_time_ms = @floatCast((end - start) * 1000.0);
@@ -200,12 +215,20 @@ pub fn main() !void {
         // --- Interaction ---
         if (c.IsKeyPressed(c.KEY_ONE)) {
             state.mutex.lock();
-            Simulation_Reset(state.handle, 100_000);
+            if (state.use_zig) {
+                state.zig_sim.reset(100_000);
+            } else {
+                Simulation_Reset(state.handle, 100_000);
+            }
             state.mutex.unlock();
         }
         if (c.IsKeyPressed(c.KEY_TWO)) {
             state.mutex.lock();
-            Simulation_Reset(state.handle, 1_000_000);
+            if (state.use_zig) {
+                state.zig_sim.reset(500_000);
+            } else {
+                Simulation_Reset(state.handle, 500_000);
+            }
             state.mutex.unlock();
         }
         if (c.IsKeyPressed(c.KEY_THREE)) {
@@ -214,6 +237,12 @@ pub fn main() !void {
             Simulation_SetUseRayon(state.handle, !current);
             state.mutex.unlock();
         }
+        if (c.IsKeyPressed(c.KEY_FOUR)) {
+            state.mutex.lock();
+            state.use_zig = !state.use_zig;
+            state.mutex.unlock();
+        }
+
         const ray = c.GetMouseRay(c.GetMousePosition(), camera);
         const t = -ray.position.z / ray.direction.z;
         const world_mouse = c.Vector3Add(ray.position, c.Vector3Scale(ray.direction, t));
@@ -224,7 +253,11 @@ pub fn main() !void {
             if (c.Vector2Length(delta) > 0.1) {
                 const force = c.Vector2Scale(delta, 10.0);
                 state.mutex.lock();
-                Simulation_ApplyForce(state.handle, mouse_2d.x, mouse_2d.y, force.x, -force.y, 50.0);
+                if (state.use_zig) {
+                    state.zig_sim.applyForce(mouse_2d.x, mouse_2d.y, force.x, -force.y, 50.0);
+                } else {
+                    Simulation_ApplyForce(state.handle, mouse_2d.x, mouse_2d.y, force.x, -force.y, 50.0);
+                }
                 state.mutex.unlock();
             }
         }
@@ -240,7 +273,11 @@ pub fn main() !void {
             const vel = c.Vector2Subtract(mouse_2d, spawn_pos);
             const radius = std.math.pow(f32, spawn_mass, 1.0 / 3.0);
             state.mutex.lock();
-            Simulation_AddBody(state.handle, spawn_pos.x, spawn_pos.y, vel.x * 0.1, vel.y * 0.1, spawn_mass, radius);
+            if (state.use_zig) {
+                state.zig_sim.addBody(spawn_pos.x, spawn_pos.y, vel.x * 0.1, vel.y * 0.1, spawn_mass, radius);
+            } else {
+                Simulation_AddBody(state.handle, spawn_pos.x, spawn_pos.y, vel.x * 0.1, vel.y * 0.1, spawn_mass, radius);
+            }
             state.mutex.unlock();
             is_spawning = false;
         }
@@ -321,11 +358,13 @@ pub fn main() !void {
         c.DrawText(c.TextFormat("Bodies: %d", @as(c_int, @intCast(body_count))), 10, 10, 20, c.RAYWHITE);
         c.DrawText(c.TextFormat("Sim Time: %.2f ms", state.sim_time_ms), 10, 35, 20, c.RAYWHITE);
         c.DrawText(c.TextFormat("FPS: %d", c.GetFPS()), 10, 60, 20, c.RAYWHITE);
-        const use_rayon = Simulation_GetUseRayon(state.handle);
-        const scheduler_name = if (use_rayon) "Rayon" else "RustFiber";
-        c.DrawText(c.TextFormat("Scheduler: %s", scheduler_name.ptr), 10, 85, 20, if (use_rayon) c.ORANGE else c.GREEN);
 
-        c.DrawText("Alt+Mouse: Cam | LMB: Force | RMB: Spawn | Q: Quadtree | 1: 100k | 2: 1M | 3: Toggle Scheduler", 10, screenHeight - 30, 20, c.GRAY);
+        const backend_name = if (state.use_zig) "Zig Sim (Barnes-Hut)" else if (Simulation_GetUseRayon(state.handle)) "Rust (Rayon)" else "Rust (Fiber)";
+        const color = if (state.use_zig) c.BLUE else if (Simulation_GetUseRayon(state.handle)) c.ORANGE else c.GREEN;
+
+        c.DrawText(c.TextFormat("Scheduler: %s", backend_name.ptr), 10, 85, 20, color);
+
+        c.DrawText("Alt+Mouse: Cam | LMB: Force | RMB: Spawn | Q: Quadtree | 1: 100k | 2: 500k | 3: Rust Toggle | 4: Use Zig", 10, screenHeight - 30, 20, c.GRAY);
 
         c.EndDrawing();
     }
