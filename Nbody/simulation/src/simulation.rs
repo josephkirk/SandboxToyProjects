@@ -80,8 +80,9 @@ impl Simulation {
         // Use a robust configuration for the job system
         let job_system = JobSystem::builder()
             .stack_size(2 * 1024 * 1024) // 2MB stack to match OS threads and prevent overflow
-            .initial_pool_size(32)
-            .target_pool_size(256)
+            .initial_pool_size(64)       // Larger initial pool
+            .target_pool_size(512)       // Allow more growth
+            .pinning_strategy(rustfiber::PinningStrategy::AvoidSMT)
             .build();
             
         Self::with_bodies_and_job_system(bodies, dt, theta, epsilon, Arc::new(job_system))
@@ -143,17 +144,39 @@ impl Simulation {
 
         self.quadtree.propagate();
 
-        let quadtree = &self.quadtree;
-        
-        // Use the new safe parallel iterator API
         if self.use_rayon {
+             let quadtree = &self.quadtree;
              self.bodies.par_iter_mut().for_each(|body| {
                   body.acc = quadtree.acc(body.pos);
              });
         } else {
-             self.bodies.fiber_iter_mut(&self.job_system).for_each(move |body| {
-                  body.acc = quadtree.acc(body.pos);
-             });
+             // Optimized RustFiber path with manual chunking to match Zig's performance
+             let len = self.bodies.len();
+             if len == 0 { return; }
+
+             let bodies_ptr = self.bodies.as_mut_ptr() as usize;
+             let quadtree_ptr = &self.quadtree as *const Quadtree as usize;
+
+             // SAFETY:
+             // 1. We access non-overlapping ranges of `bodies` (guaranteed by job system partitioner)
+             // 2. `quadtree` is read-only
+             let counter = self.job_system.parallel_for_chunked_with_hint(
+                 0..len,
+                 rustfiber::GranularityHint::Light, // Target ~4 jobs per worker
+                 move |range| {
+                     unsafe {
+                         let bodies = std::slice::from_raw_parts_mut(bodies_ptr as *mut Body, len);
+                         let qt = &*(quadtree_ptr as *const Quadtree);
+                         
+                         for i in range {
+                             // Use get_unchecked for the bodies array inside the known valid range
+                             // (Though iterator elision should handle this, specific indices help)
+                             bodies.get_unchecked_mut(i).acc = qt.acc(bodies.get_unchecked(i).pos);
+                         }
+                     }
+                 }
+             );
+             self.job_system.wait_for_counter(&counter);
         }
     }
 

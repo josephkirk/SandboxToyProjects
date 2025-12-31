@@ -233,12 +233,19 @@ impl Quadtree {
 
     /// Calculates the gravitational acceleration at a given position.
     /// Uses the Barnes-Hut approximation criteria.
+    #[inline(always)]
     pub fn acc(&self, pos: Vec2) -> Vec2 {
         let mut acc = Vec2::zero();
 
-        let mut node = Self::ROOT;
+        let mut node_idx = Self::ROOT;
+        if self.nodes.is_empty() {
+             return acc;
+        }
+
         loop {
-            let n = &self.nodes[node];
+            // SAFETY: The tree construction ensures valid indices. Next/Children indices are always valid or 0.
+            // Removing bounds checks is critical for performance here.
+            let n = unsafe { self.nodes.get_unchecked(node_idx) };
 
             let d = n.pos - pos;
             let d_sq = d.mag_sq();
@@ -247,18 +254,20 @@ impl Quadtree {
             // Equivalent to: s^2 < d^2 * theta^2
             if n.is_leaf() || n.quad.size * n.quad.size < d_sq * self.t_sq {
                 // Treat node as a single body
-                let denom_term = d_sq + self.e_sq;
-                let denom = denom_term * denom_term.sqrt();
-                acc += d * (n.mass / denom);
+                if n.mass > 1e-10 {
+                    let denom_term = d_sq + self.e_sq;
+                    let denom = denom_term * denom_term.sqrt();
+                    acc += d * (n.mass / denom);
+                }
 
                 // Skip children, go to next sibling/node
                 if n.next == 0 {
                     break;
                 }
-                node = n.next as usize;
+                node_idx = n.next as usize;
             } else {
                 // Node is too close/large, recurse into children
-                node = n.children as usize;
+                node_idx = n.children as usize;
             }
         }
 
