@@ -247,8 +247,9 @@ impl Quadtree {
             // Equivalent to: s^2 < d^2 * theta^2
             if n.is_leaf() || n.quad.size * n.quad.size < d_sq * self.t_sq {
                 // Treat node as a single body
-                let denom = (d_sq + self.e_sq) * d_sq.sqrt();
-                acc += d * (n.mass / denom).min(f32::MAX);
+                let denom_term = d_sq + self.e_sq;
+                let denom = denom_term * denom_term.sqrt();
+                acc += d * (n.mass / denom);
 
                 // Skip children, go to next sibling/node
                 if n.next == 0 {
