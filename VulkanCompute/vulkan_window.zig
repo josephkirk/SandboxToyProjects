@@ -28,46 +28,60 @@ pub const VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT = c.VK_PIPELINE_STAGE_FRAGMENT_S
 pub const VK_ACCESS_SHADER_WRITE_BIT = c.VK_ACCESS_SHADER_WRITE_BIT;
 pub const VK_ACCESS_SHADER_READ_BIT = c.VK_ACCESS_SHADER_READ_BIT;
 
+/// WindowContext handles the lifecycle of a Vulkan-enabled window on Windows (Win32).
+/// It manages the swapchain, rendering resources, and the main frame loop.
 pub const WindowContext = struct {
     allocator: std.mem.Allocator,
-    instance: c.VkInstance,
-    surface: c.VkSurfaceKHR,
-    physical_device: c.VkPhysicalDevice,
-    device: c.VkDevice,
-    queue_family_index: u32,
-    queue: c.VkQueue,
-    swapchain: c.VkSwapchainKHR,
-    swapchain_images: []c.VkImage,
-    swapchain_image_views: []c.VkImageView,
-    render_pass: c.VkRenderPass,
-    framebuffers: []c.VkFramebuffer,
-    command_pool: c.VkCommandPool,
-    command_buffers: []c.VkCommandBuffer,
 
-    // Sync objects (single set, wait on fence between frames)
+    // Core Vulkan Handles
+    instance: c.VkInstance, // The Vulkan context
+    surface: c.VkSurfaceKHR, // The link between Vulkan and the OS window
+    physical_device: c.VkPhysicalDevice, // The GPU hardware handle
+    device: c.VkDevice, // The logical device for resource creation
+    queue_family_index: u32,
+    queue: c.VkQueue, // Where we submit drawing commands
+
+    // Swapchain resources (The "Buffer" that gets shown on screen)
+    swapchain: c.VkSwapchainKHR,
+    swapchain_images: []c.VkImage, // The raw images provided by the swapchain
+    swapchain_image_views: []c.VkImageView, // How we view those images (formats, etc)
+
+    // Render workflow
+    render_pass: c.VkRenderPass, // Describes what to do with attachments (Clear, Store, etc)
+    framebuffers: []c.VkFramebuffer, // Links image views to the render pass
+    command_pool: c.VkCommandPool, // Source for allocating command buffers
+    command_buffers: []c.VkCommandBuffer, // Pre-allocated containers for GPU commands
+
+    // Synchronization (The most critical part of Vulkan)
+    /// Semaphore: GPU-GPU sync. Used to wait for image acquisition before rendering.
     image_available_semaphore: c.VkSemaphore,
+    /// Semaphore: GPU-GPU sync. Used to wait for rendering to finish before presenting.
     render_finished_semaphore: c.VkSemaphore,
+    /// Fence: GPU-CPU sync. Used to make the CPU wait until the GPU is done with a frame.
     in_flight_fence: c.VkFence,
     images_in_flight: []?c.VkFence,
 
-    // Win32 handles
+    // Platform specific (Win32)
     h_instance: os.HINSTANCE,
     hwnd: os.HWND,
 
-    current_frame: usize = 0,
-    current_image_index: u32 = 0,
-    MAX_FRAMES_IN_FLIGHT: usize = 2,
+    // State
+    current_frame: usize = 0, // Frame number (0 or 1 if MAX_FRAMES_IN_FLIGHT=2)
+    current_image_index: u32 = 0, // The index of the actual image being drawn to
+    MAX_FRAMES_IN_FLIGHT: usize = 2, // Allows us to prepare a new frame while the old one renders
     width: u32,
     height: u32,
 
-    // Input state
+    // Mouse/Input State
     mouse_x: i32 = 0,
     mouse_y: i32 = 0,
     mouse_left: bool = false,
     mouse_right: bool = false,
 
+    /// Initializes a Windows window and sets up Vulkan Graphics/Compute context.
     pub fn init(allocator: std.mem.Allocator, width: u32, height: u32, title: [*:0]const u8) !WindowContext {
         // 1. Create Win32 Window
+        // This is standard Windows boilerplate to get a window handle (HWND).
         const h_instance = @as(os.HINSTANCE, @ptrCast(os.kernel32.GetModuleHandleW(null)));
         const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigVulkanWindowClass");
 
@@ -107,6 +121,8 @@ pub const WindowContext = struct {
         ) orelse return error.WindowCreationFailed;
 
         // 2. Create Vulkan Instance
+        // The instance is the starting point. We specify the application info and extensions.
+        // On Windows, we need VK_KHR_win32_surface to talk to the Win32 windowing system.
         const appInfo = c.VkApplicationInfo{
             .sType = c.VK_STRUCTURE_TYPE_APPLICATION_INFO,
             .pNext = null,
@@ -139,6 +155,8 @@ pub const WindowContext = struct {
         }
         errdefer c.vkDestroyInstance(instance, null);
 
+        // 3. Create Surface
+        // The surface represents the OS-specific window in a Vulkan-compatible way.
         var surface_create_info = c.VkWin32SurfaceCreateInfoKHR{
             .sType = c.VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
             .pNext = null,
@@ -146,6 +164,7 @@ pub const WindowContext = struct {
             .hinstance = null,
             .hwnd = null,
         };
+        // We use a bit of low-level pointer casting to set the handles robustly.
         @as(*allowzero usize, @ptrCast(&surface_create_info.hinstance)).* = @intFromPtr(h_instance);
         @as(*allowzero usize, @ptrCast(&surface_create_info.hwnd)).* = @intFromPtr(hwnd);
 
@@ -155,7 +174,8 @@ pub const WindowContext = struct {
         }
         errdefer c.vkDestroySurfaceKHR(instance, surface, null);
 
-        // 4. Pick Physical Device and Queue Family
+        // 4. Pick Physical Device (GPU) and Queue Family
+        // We look for a GPU that supports both graphics commands and presenting to our surface.
         var device_count: u32 = 0;
         _ = c.vkEnumeratePhysicalDevices(instance, &device_count, null);
         if (device_count == 0) return error.NoVulkanDevicesFound;
@@ -181,7 +201,6 @@ pub const WindowContext = struct {
                     if (present_support == c.VK_TRUE) {
                         picked_pdev = pdev;
                         picked_qfi = @intCast(i);
-
                         break;
                     }
                 }
@@ -192,6 +211,7 @@ pub const WindowContext = struct {
         if (picked_pdev == null) return error.NoSuitableDeviceFound;
 
         // 5. Create Logical Device
+        // This is our software interface to the GPU. We specify we need the Swapchain extension.
         const queue_priority = @as(f32, 1.0);
         const queue_create_info = c.VkDeviceQueueCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -204,6 +224,7 @@ pub const WindowContext = struct {
 
         const device_extensions = [_][*:0]const u8{"VK_KHR_swapchain"};
 
+        // Enable storage image support in fragment shaders for compute-graphics interaction.
         var features = std.mem.zeroInit(c.VkPhysicalDeviceFeatures, .{});
         features.fragmentStoresAndAtomics = c.VK_TRUE;
 
@@ -230,6 +251,7 @@ pub const WindowContext = struct {
         c.vkGetDeviceQueue(device, picked_qfi, 0, &queue);
 
         // 6. Create Swapchain
+        // The swapchain is a queue of images that are waiting to be presented to the screen.
         var caps: c.VkSurfaceCapabilitiesKHR = undefined;
         _ = c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(picked_pdev, surface, &caps);
 
@@ -239,6 +261,7 @@ pub const WindowContext = struct {
         defer allocator.free(formats);
         _ = c.vkGetPhysicalDeviceSurfaceFormatsKHR(picked_pdev, surface, &format_count, formats.ptr);
 
+        // We prefer B8G8R8A8_SRGB for standard colors.
         var chosen_format = formats[0];
         for (formats) |fmt| {
             if (fmt.format == c.VK_FORMAT_B8G8R8A8_SRGB and fmt.colorSpace == c.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
@@ -253,6 +276,7 @@ pub const WindowContext = struct {
         defer allocator.free(present_modes);
         _ = c.vkGetPhysicalDeviceSurfacePresentModesKHR(picked_pdev, surface, &present_mode_count, present_modes.ptr);
 
+        // MAILBOX is preferred (triple buffering) for low latency without tearing.
         var chosen_present_mode: c.VkPresentModeKHR = c.VK_PRESENT_MODE_IMMEDIATE_KHR;
         for (present_modes) |mode| {
             if (mode == c.VK_PRESENT_MODE_MAILBOX_KHR) {
@@ -299,16 +323,15 @@ pub const WindowContext = struct {
         }
         errdefer c.vkDestroySwapchainKHR(device, swapchain, null);
 
-        // Get Images
+        // Fetch the list of images created by the swapchain.
         _ = c.vkGetSwapchainImagesKHR(device, swapchain, &image_count, null);
         const swapchain_images = try allocator.alloc(c.VkImage, image_count);
         errdefer allocator.free(swapchain_images);
-
         _ = c.vkGetSwapchainImagesKHR(device, swapchain, &image_count, swapchain_images.ptr);
 
-        // Create Image Views
+        // Create an ImageView for each swapchain image so we can use them as render targets.
         const swapchain_image_views = try allocator.alloc(c.VkImageView, image_count);
-        errdefer allocator.free(swapchain_image_views); // Cleanup memory if fail, but views need destroy
+        errdefer allocator.free(swapchain_image_views);
 
         for (swapchain_images, 0..) |img, i| {
             const view_info = c.VkImageViewCreateInfo{
@@ -336,16 +359,18 @@ pub const WindowContext = struct {
         }
 
         // 7. Create Render Pass
+        // The render pass describes how image attachments are used during rendering.
+        // It's like a blueprint for the GPU's memory operations.
         const color_attachment = c.VkAttachmentDescription{
             .flags = 0,
             .format = chosen_format.format,
             .samples = c.VK_SAMPLE_COUNT_1_BIT,
-            .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp = c.VK_ATTACHMENT_STORE_OP_STORE,
+            .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR, // Clear image at start of pass
+            .storeOp = c.VK_ATTACHMENT_STORE_OP_STORE, // Keep result for presentation
             .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             .stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
             .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
-            .finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, // Ready to be shown
         };
 
         const color_attachment_ref = c.VkAttachmentReference{
@@ -366,6 +391,7 @@ pub const WindowContext = struct {
             .pPreserveAttachments = null,
         };
 
+        // Dependency ensures we wait for previous frames to finish using the image.
         const dependency = c.VkSubpassDependency{
             .srcSubpass = c.VK_SUBPASS_EXTERNAL,
             .dstSubpass = 0,
@@ -395,6 +421,7 @@ pub const WindowContext = struct {
         errdefer c.vkDestroyRenderPass(device, render_pass, null);
 
         // 8. Create Framebuffers
+        // Framebuffers link the Render Pass to the actual ImageViews from the swapchain.
         const framebuffers = try allocator.alloc(c.VkFramebuffer, image_count);
         errdefer allocator.free(framebuffers);
 
@@ -420,6 +447,7 @@ pub const WindowContext = struct {
         }
 
         // 9. Create Command Pool
+        // A pool of memory from which we allocate Command Buffers.
         const pool_info = c.VkCommandPoolCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
             .pNext = null,
@@ -434,6 +462,7 @@ pub const WindowContext = struct {
         errdefer c.vkDestroyCommandPool(device, command_pool, null);
 
         // 10. Allocate Command Buffers
+        // We use 2 frames in flight so we can record one while the other is being rendered.
         const MAX_FRAMES_IN_FLIGHT = 2;
         const command_buffers = try allocator.alloc(c.VkCommandBuffer, MAX_FRAMES_IN_FLIGHT);
         errdefer allocator.free(command_buffers);
@@ -450,7 +479,8 @@ pub const WindowContext = struct {
             return error.VulkanCommandBufferAllocationFailed;
         }
 
-        // 11. Create Sync Objects (single set)
+        // 11. Create Sync Objects
+        // Sync objects are the heart of Vulkan performance and stability.
         const semaphore_info = c.VkSemaphoreCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
             .pNext = null,
@@ -460,7 +490,7 @@ pub const WindowContext = struct {
         const fence_info = c.VkFenceCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
             .pNext = null,
-            .flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
+            .flags = c.VK_FENCE_CREATE_SIGNALED_BIT, // Start signaled so first frame doesn't wait forever
         };
 
         var image_available_semaphore: c.VkSemaphore = undefined;
@@ -492,7 +522,7 @@ pub const WindowContext = struct {
             .image_available_semaphore = image_available_semaphore,
             .render_finished_semaphore = render_finished_semaphore,
             .in_flight_fence = in_flight_fence,
-            .images_in_flight = undefined,
+            .images_in_flight = undefined, // Placeholder for tracking images being used by fences
             .h_instance = h_instance,
             .hwnd = hwnd,
             .width = extent.width,
@@ -565,11 +595,15 @@ pub const WindowContext = struct {
         return true;
     }
 
+    /// Prepares the system for a new frame. Returns a command buffer for recording.
     pub fn beginFrame(self: *WindowContext) !c.VkCommandBuffer {
-        // Wait for the fence from previous frame
+        // 1. Wait for the GPU to finish the last frame that used this current_frame slot.
+        // Fences are used to make the CPU wait for the GPU.
         _ = c.vkWaitForFences(self.device, 1, &self.in_flight_fence, c.VK_TRUE, std.math.maxInt(u64));
         _ = c.vkResetFences(self.device, 1, &self.in_flight_fence);
 
+        // 2. Obtain an image from the swapchain to draw into.
+        // This will signal 'image_available_semaphore' when the GPU is ready to use the image.
         var image_index: u32 = 0;
         const result = c.vkAcquireNextImageKHR(self.device, self.swapchain, std.math.maxInt(u64), self.image_available_semaphore, null, &image_index);
 
@@ -583,6 +617,7 @@ pub const WindowContext = struct {
 
         const cmdbuf = self.command_buffers[self.current_frame];
 
+        // 3. Reset the command buffer so we can record fresh commands.
         _ = c.vkResetCommandBuffer(cmdbuf, 0);
 
         const begin_info = c.VkCommandBufferBeginInfo{
@@ -599,6 +634,7 @@ pub const WindowContext = struct {
         return cmdbuf;
     }
 
+    /// Starts a Render Pass, defining the target framebuffer and clear colors.
     pub fn beginRenderPass(self: *WindowContext, cmdbuf: c.VkCommandBuffer) void {
         const clear_color = c.VkClearValue{ .color = .{ .float32 = .{ 0.0, 0.0, 0.0, 1.0 } } };
 
@@ -615,8 +651,10 @@ pub const WindowContext = struct {
             .pClearValues = &clear_color,
         };
 
+        // All graphics commands must be recorded within a Begin/EndRenderPass block.
         c.vkCmdBeginRenderPass(cmdbuf, &render_pass_begin_info, c.VK_SUBPASS_CONTENTS_INLINE);
 
+        // Viewport and Scissor define where on the screen we draw.
         const viewport = c.VkViewport{
             .x = 0.0,
             .y = 0.0,
@@ -639,6 +677,7 @@ pub const WindowContext = struct {
         c.vkCmdEndRenderPass(cmdbuf);
     }
 
+    /// Submits the recorded commands to the GPU and presents the image to the screen.
     pub fn endFrame(self: *WindowContext) !void {
         const cmdbuf = self.command_buffers[self.current_frame];
 
@@ -646,6 +685,9 @@ pub const WindowContext = struct {
             return error.VulkanEndCommandBufferFailed;
         }
 
+        // Submitting to the queue.
+        // We MUST wait for 'image_available_semaphore' before outputting to the screen.
+        // We will signal 'render_finished_semaphore' when we're done.
         const wait_stages = [_]c.VkPipelineStageFlags{c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
         const submit_info = c.VkSubmitInfo{
             .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -659,11 +701,14 @@ pub const WindowContext = struct {
             .pSignalSemaphores = &self.render_finished_semaphore,
         };
 
+        // Reset and signal the in_flight_fence so we know when the GPU is truly finished.
         const res = c.vkQueueSubmit(self.queue, 1, &submit_info, self.in_flight_fence);
         if (res != c.VK_SUCCESS) {
             return error.VulkanQueueSubmitFailed;
         }
 
+        // 4. Present the image to the screen.
+        // We wait for 'render_finished_semaphore' before presenting.
         const present_info = c.VkPresentInfoKHR{
             .sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = null,
@@ -676,8 +721,11 @@ pub const WindowContext = struct {
         };
 
         _ = c.vkQueuePresentKHR(self.queue, &present_info);
+
+        // Wait for idle ensures we don't start the next frame before everything is synced (simple but safe).
         _ = c.vkQueueWaitIdle(self.queue);
 
+        // Move to next frame slot in our triple/double buffering scheme.
         self.current_frame = (self.current_frame + 1) % self.MAX_FRAMES_IN_FLIGHT;
     }
 
@@ -1068,6 +1116,8 @@ pub const WindowContext = struct {
         c.vkCmdPushConstants(cmdbuf, layout, stage, offset, size, ptr);
     }
 
+    /// Transitions an image between different layouts (e.g., from General to Shader Read Only).
+    /// This is required because GPUs store data differently depending on how it will be used.
     pub fn transitionImageLayout(self: *WindowContext, cmdbuf: c.VkCommandBuffer, image: c.VkImage, oldLayout: c.VkImageLayout, newLayout: c.VkImageLayout) void {
         _ = self;
         var barrier = c.VkImageMemoryBarrier{
@@ -1091,27 +1141,32 @@ pub const WindowContext = struct {
         var sourceStage: c.VkPipelineStageFlags = 0;
         var destinationStage: c.VkPipelineStageFlags = 0;
 
+        // Transitions for Sand Simulation:
         if (oldLayout == c.VK_IMAGE_LAYOUT_UNDEFINED and newLayout == c.VK_IMAGE_LAYOUT_GENERAL) {
+            // Initial transition to general storage layout.
             barrier.srcAccessMask = 0;
             barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT | c.VK_ACCESS_SHADER_WRITE_BIT;
             sourceStage = c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
             destinationStage = c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
         } else if (oldLayout == c.VK_IMAGE_LAYOUT_GENERAL and newLayout == c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            // Compute shader is done writing; Fragment shader is about to read.
             barrier.srcAccessMask = c.VK_ACCESS_SHADER_WRITE_BIT;
             barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
             sourceStage = c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
             destinationStage = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
         } else if (oldLayout == c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL and newLayout == c.VK_IMAGE_LAYOUT_GENERAL) {
+            // Fragment shader is done reading; Compute shader is about to write again.
             barrier.srcAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
             barrier.dstAccessMask = c.VK_ACCESS_SHADER_WRITE_BIT;
             sourceStage = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
             destinationStage = c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
         } else {
-            // Generic fallback
+            // Generic fallback transition.
             sourceStage = c.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
             destinationStage = c.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
         }
 
+        // The pipeline barrier tells the GPU to finish specific tasks before moving to the next stage.
         c.vkCmdPipelineBarrier(cmdbuf, sourceStage, destinationStage, 0, 0, null, 0, null, 1, &barrier);
     }
 

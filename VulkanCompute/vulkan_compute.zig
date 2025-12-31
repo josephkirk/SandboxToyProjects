@@ -1,27 +1,48 @@
 const std = @import("std");
 
+/// The @cImport function allows us to use C headers directly in Zig.
+/// Here we are importing the Vulkan header, which contains the API definitions.
 pub const c = @cImport({
     @cInclude("vulkan/vulkan.h");
 });
 
+/// Context holds the basic Vulkan objects required for compute operations.
 pub const Context = struct {
     allocator: std.mem.Allocator,
+
+    /// VkInstance is the connection between your application and the Vulkan runtime.
+    /// It stores application-level state and defines which extensions and layers are used.
     instance: c.VkInstance,
+
+    /// VkPhysicalDevice represents a specific GPU in the system.
+    /// We use it to query hardware capabilities, properties, and limits.
     physical_device: c.VkPhysicalDevice,
+
+    /// VkDevice is the logical device used to interact with the physical device.
+    /// This is where we create most of our Vulkan resources (buffers, pipelines, etc.).
     device: c.VkDevice,
+
+    /// Vulkan queues are grouped into families. Each family supports specific operations
+    /// (e.g., Graphics, Compute, Transfer). We store the index of the family we use.
     queue_family_index: u32,
+
+    /// VkQueue is the handle used to submit command buffers to the GPU for execution.
     queue: c.VkQueue,
+
+    /// VkCommandPool manages memory for command buffers.
     command_pool: c.VkCommandPool,
 
+    /// Initializes the Vulkan context for compute-only tasks.
     pub fn init(allocator: std.mem.Allocator, app_name: [*:0]const u8) !Context {
         // 1. Create Instance
+        // ApplicationInfo helps the driver optimize for specific engines or versions.
         const appInfo = c.VkApplicationInfo{
             .sType = c.VK_STRUCTURE_TYPE_APPLICATION_INFO,
             .pApplicationName = app_name,
             .applicationVersion = c.VK_MAKE_VERSION(1, 0, 0),
             .pEngineName = "No Engine",
             .engineVersion = c.VK_MAKE_VERSION(1, 0, 0),
-            .apiVersion = c.VK_API_VERSION_1_2,
+            .apiVersion = c.VK_API_VERSION_1_2, // We target Vulkan 1.2
             .pNext = null,
         };
 
@@ -43,6 +64,7 @@ pub const Context = struct {
         errdefer c.vkDestroyInstance(instance, null);
 
         // 2. Select Physical Device
+        // We enumerate all available GPUs and pick the first one for simplicity.
         var deviceCount: u32 = 0;
         _ = c.vkEnumeratePhysicalDevices(instance, &deviceCount, null);
         if (deviceCount == 0) return error.NoVulkanDevices;
@@ -51,10 +73,10 @@ pub const Context = struct {
         defer allocator.free(pDevices);
         _ = c.vkEnumeratePhysicalDevices(instance, &deviceCount, pDevices.ptr);
 
-        // Simple selection: pick first
         const physical_device = pDevices[0];
 
         // 3. Find Compute Queue
+        // Queues are the entry point for work on the GPU. We need a family that supports Compute.
         var queueFamilyCount: u32 = 0;
         c.vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queueFamilyCount, null);
         const queueProps = try allocator.alloc(c.VkQueueFamilyProperties, queueFamilyCount);
@@ -72,6 +94,7 @@ pub const Context = struct {
         const q_family_index = computeFamilyIndex.?;
 
         // 4. Create Logical Device
+        // We describe which queues we want to use and which features we need.
         const queuePriority: f32 = 1.0;
         const queueCreateInfo = c.VkDeviceQueueCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -86,11 +109,11 @@ pub const Context = struct {
             .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
             .pQueueCreateInfos = &queueCreateInfo,
             .queueCreateInfoCount = 1,
+            .pEnabledFeatures = null, // No special features requested
             .enabledExtensionCount = 0,
             .ppEnabledExtensionNames = null,
             .enabledLayerCount = 0,
             .ppEnabledLayerNames = null,
-            .pEnabledFeatures = null,
             .pNext = null,
             .flags = 0,
         };
@@ -101,14 +124,16 @@ pub const Context = struct {
         }
         errdefer c.vkDestroyDevice(device, null);
 
+        // Fetch the queue handle after device creation.
         var queue: c.VkQueue = undefined;
         c.vkGetDeviceQueue(device, q_family_index, 0, &queue);
 
         // 5. Create Command Pool
+        // Command buffers are allocated from pools to reduce allocation overhead.
         const cmdPoolInfo = c.VkCommandPoolCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
             .queueFamilyIndex = q_family_index,
-            .flags = 0, // We could use VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT if needed
+            .flags = 0,
             .pNext = null,
         };
 
@@ -134,6 +159,8 @@ pub const Context = struct {
         c.vkDestroyInstance(self.instance, null);
     }
 
+    /// Creates a VkBuffer and allocates/binds memory for it.
+    /// In Vulkan, creating a buffer and allocating memory are separate steps.
     pub fn createBuffer(self: Context, size: u64, usage: c.VkBufferUsageFlags) !Buffer {
         const bufferCreateInfo = c.VkBufferCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -152,10 +179,13 @@ pub const Context = struct {
         }
         errdefer c.vkDestroyBuffer(self.device, vk_buffer, null);
 
-        // Memory
+        // 1. Get memory requirements for the buffer (size and alignment).
         var memReqs: c.VkMemoryRequirements = undefined;
         c.vkGetBufferMemoryRequirements(self.device, vk_buffer, &memReqs);
 
+        // 2. Find a memory type that is both compatible with the buffer
+        //    AND supported by the hardware for our specific needs
+        //    (e.g., host-visible for CPU mapping).
         var memProps: c.VkPhysicalDeviceMemoryProperties = undefined;
         c.vkGetPhysicalDeviceMemoryProperties(self.physical_device, &memProps);
 
@@ -179,12 +209,14 @@ pub const Context = struct {
             .pNext = null,
         };
 
+        // 3. Allocate memory on the device.
         var memory: c.VkDeviceMemory = undefined;
         if (c.vkAllocateMemory(self.device, &allocInfo, null, &memory) != c.VK_SUCCESS) {
             return error.MemoryAllocationFailed;
         }
         errdefer c.vkFreeMemory(self.device, memory, null);
 
+        // 4. Bind the allocated memory to the buffer.
         if (c.vkBindBufferMemory(self.device, vk_buffer, memory, 0) != c.VK_SUCCESS) {
             return error.BindBufferMemoryFailed;
         }
@@ -196,7 +228,9 @@ pub const Context = struct {
         };
     }
 
+    /// Creates a simple compute pipeline using the provided SPIR-V bytecode.
     pub fn createSimpleComputePipeline(self: Context, spirv_code: []const u8) !SimplePipeline {
+        // Shader module represents compiled code.
         const shaderModuleCreateInfo = c.VkShaderModuleCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
             .codeSize = spirv_code.len,
@@ -209,9 +243,9 @@ pub const Context = struct {
         if (c.vkCreateShaderModule(self.device, &shaderModuleCreateInfo, null, &shaderModule) != c.VK_SUCCESS) {
             return error.ShaderModuleCreationFailed;
         }
-        // defer c.vkDestroyShaderModule(self.device, shaderModule, null);
-        // We can destroy it after pipeline creation, typically.
 
+        // DescriptorSetLayout defines the "interface" between the application and the shader.
+        // It describes how many buffers/images the shader expects.
         const binding = c.VkDescriptorSetLayoutBinding{
             .binding = 0,
             .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -234,6 +268,7 @@ pub const Context = struct {
         }
         errdefer c.vkDestroyDescriptorSetLayout(self.device, descriptorSetLayout, null);
 
+        // PipelineLayout is a collection of DescriptorSetLayouts and Push Constant ranges.
         const pipelineLayoutInfo = c.VkPipelineLayoutCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount = 1,
@@ -261,6 +296,7 @@ pub const Context = struct {
             .flags = 0,
         };
 
+        // ComputePipeline contains the final GPU state to run the shader.
         const pipelineInfo = c.VkComputePipelineCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
             .stage = shaderStageInfo,
@@ -276,6 +312,7 @@ pub const Context = struct {
             return error.PipelineCreationFailed;
         }
 
+        // We can destroy the shader module once the pipeline is created.
         c.vkDestroyShaderModule(self.device, shaderModule, null);
 
         return SimplePipeline{
@@ -285,8 +322,9 @@ pub const Context = struct {
         };
     }
 
+    /// Runs a compute pipeline on a buffer and waits for completion.
     pub fn runSimple(self: Context, pipeline: SimplePipeline, buffer: Buffer, x: u32, y: u32, z: u32) !void {
-        // Create Descriptor Pool / Set (Ephemeral for simplicity, or could be cached in pipeline)
+        // Descriptor Pool is required to allocate Descriptor Sets.
         const poolSize = c.VkDescriptorPoolSize{
             .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             .descriptorCount = 1,
@@ -305,6 +343,7 @@ pub const Context = struct {
         if (c.vkCreateDescriptorPool(self.device, &descriptorPoolInfo, null, &descriptorPool) != c.VK_SUCCESS) return error.DescriptorPoolCreationFailed;
         defer c.vkDestroyDescriptorPool(self.device, descriptorPool, null);
 
+        // Allocate a Descriptor Set from the pool.
         const allocSetInfo = c.VkDescriptorSetAllocateInfo{
             .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
             .descriptorPool = descriptorPool,
@@ -316,6 +355,7 @@ pub const Context = struct {
         var descriptorSet: c.VkDescriptorSet = undefined;
         if (c.vkAllocateDescriptorSets(self.device, &allocSetInfo, &descriptorSet) != c.VK_SUCCESS) return error.DescriptorSetAllocationFailed;
 
+        // Update Descriptor Set to point to our buffer.
         const bufferInfo = c.VkDescriptorBufferInfo{
             .buffer = buffer.handle,
             .offset = 0,
@@ -337,7 +377,7 @@ pub const Context = struct {
 
         c.vkUpdateDescriptorSets(self.device, 1, &writeDescriptorSet, 0, null);
 
-        // Command Buffer
+        // Allocate a command buffer to record commands.
         const cmdBufAllocInfo = c.VkCommandBufferAllocateInfo{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .commandPool = self.command_pool,
@@ -349,10 +389,7 @@ pub const Context = struct {
         var commandBuffer: c.VkCommandBuffer = undefined;
         if (c.vkAllocateCommandBuffers(self.device, &cmdBufAllocInfo, &commandBuffer) != c.VK_SUCCESS) return error.CommandBufferAllocationFailed;
 
-        // We should really free this command buffer, or use a cached one.
-        // For this simple API, we'll try to just submit and wait.
-        // But `vkFreeCommandBuffers` is good practice.
-
+        // Record the commands.
         const beginInfo = c.VkCommandBufferBeginInfo{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
@@ -363,9 +400,10 @@ pub const Context = struct {
         _ = c.vkBeginCommandBuffer(commandBuffer, &beginInfo);
         c.vkCmdBindPipeline(commandBuffer, c.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.handle);
         c.vkCmdBindDescriptorSets(commandBuffer, c.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &descriptorSet, 0, null);
-        c.vkCmdDispatch(commandBuffer, x, y, z);
+        c.vkCmdDispatch(commandBuffer, x, y, z); // Launch threads!
         _ = c.vkEndCommandBuffer(commandBuffer);
 
+        // Submit to the queue for execution.
         const submitInfo = c.VkSubmitInfo{
             .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .commandBufferCount = 1,
@@ -379,12 +417,15 @@ pub const Context = struct {
         };
 
         if (c.vkQueueSubmit(self.queue, 1, &submitInfo, null) != c.VK_SUCCESS) return error.QueueSubmitFailed;
+
+        // Wait for work to finish (inefficient but simple).
         _ = c.vkQueueWaitIdle(self.queue);
 
         c.vkFreeCommandBuffers(self.device, self.command_pool, 1, &commandBuffer);
     }
 };
 
+/// Represents a GPU buffer and its backing memory.
 pub const Buffer = struct {
     handle: c.VkBuffer,
     memory: c.VkDeviceMemory,
@@ -395,6 +436,7 @@ pub const Buffer = struct {
         c.vkFreeMemory(ctx.device, self.memory, null);
     }
 
+    /// Maps device memory into the application's address space for CPU access.
     pub fn map(self: Buffer, ctx: Context, comptime T: type) ![]T {
         var data: [*]T = undefined;
         if (c.vkMapMemory(ctx.device, self.memory, 0, self.size, 0, @ptrCast(&data)) != c.VK_SUCCESS) {
@@ -403,11 +445,13 @@ pub const Buffer = struct {
         return data[0 .. self.size / @sizeOf(T)];
     }
 
+    /// Unmaps the memory - CPU can no longer access it directly.
     pub fn unmap(self: Buffer, ctx: Context) void {
         c.vkUnmapMemory(ctx.device, self.memory);
     }
 };
 
+/// Represents a compiled compute pipeline.
 pub const SimplePipeline = struct {
     handle: c.VkPipeline,
     layout: c.VkPipelineLayout,
@@ -420,11 +464,11 @@ pub const SimplePipeline = struct {
     }
 };
 
+/// Helper to compile HLSL/GLSL shaders to SPIR-V at runtime.
 pub const ShaderCompiler = struct {
     pub fn compile(allocator: std.mem.Allocator, source_path: []const u8, entry_point: []const u8, profile: []const u8) ![]u8 {
         const extension = std.fs.path.extension(source_path);
 
-        // Generate a unique output filename
         const timestamp = std.time.nanoTimestamp();
         const out_filename = try std.fmt.allocPrint(allocator, "temp_shader_{d}.spv", .{timestamp});
         defer allocator.free(out_filename);
@@ -433,6 +477,7 @@ pub const ShaderCompiler = struct {
         var argc: usize = 0;
 
         if (std.mem.eql(u8, extension, ".hlsl")) {
+            // Use DXC for HLSL to SPIR-V
             argv_buf[argc] = "C:\\VulkanSDK\\1.4.335.0\\Bin\\dxc.exe";
             argc += 1;
             argv_buf[argc] = "-T";
@@ -452,6 +497,7 @@ pub const ShaderCompiler = struct {
             argv_buf[argc] = out_filename;
             argc += 1;
         } else if (std.mem.eql(u8, extension, ".glsl") or std.mem.eql(u8, extension, ".comp")) {
+            // Use glslc for GLSL to SPIR-V
             argv_buf[argc] = "glslc";
             argc += 1;
             argv_buf[argc] = source_path;
@@ -473,13 +519,6 @@ pub const ShaderCompiler = struct {
 
         const term = child.spawnAndWait() catch |err| {
             std.debug.print("Failed to spawn compiler: {}\n", .{err});
-            // Try fallback if dxc
-            if (std.mem.eql(u8, extension, ".hlsl")) {
-                std.debug.print("Attempting fallback path for dxc...\n", .{});
-                // Re-init with fallback
-                // For now, just fail
-                return err;
-            }
             return err;
         };
 
@@ -493,7 +532,6 @@ pub const ShaderCompiler = struct {
             else => return error.ShaderCompilationCrashed,
         }
 
-        // Read output
         const file = try std.fs.cwd().openFile(out_filename, .{});
         defer {
             file.close();
