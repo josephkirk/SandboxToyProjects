@@ -265,6 +265,8 @@ pub const ZigSimulation = struct {
     bodies: std.ArrayListUnmanaged(Body),
     quadtree: Quadtree,
     allocator: std.mem.Allocator,
+    pool: std.Thread.Pool,
+    wg: std.Thread.WaitGroup,
     G: f32 = 0.5,
     dt: f32 = 0.016,
     softening: f32 = 5.0,
@@ -275,11 +277,15 @@ pub const ZigSimulation = struct {
             .bodies = .{},
             .quadtree = Quadtree.init(allocator, 1.0, 5.0),
             .allocator = allocator,
+            .pool = undefined,
+            .wg = .{},
         };
+        try std.Thread.Pool.init(&self.pool, .{ .allocator = allocator });
         return self;
     }
 
     pub fn deinit(self: *ZigSimulation) void {
+        self.pool.deinit();
         self.bodies.deinit(self.allocator);
         self.quadtree.deinit();
         self.allocator.destroy(self);
@@ -329,8 +335,14 @@ pub const ZigSimulation = struct {
         }) catch {};
     }
 
+    fn calcForcesChunk(qt: *const Quadtree, bodies: []Body, theta_sq: f32, eps_sq: f32) void {
+        for (bodies) |*b| {
+            b.acc = qt.acc(b.pos, theta_sq, eps_sq);
+        }
+    }
+
     pub fn step(self: *ZigSimulation) void {
-        // Rebuild Quadtree
+        // Rebuild Quadtree (Sequential - fast enough usually)
         const root_quad = Quad.newContaining(self.bodies.items);
         self.quadtree.clear(root_quad) catch return;
 
@@ -339,16 +351,32 @@ pub const ZigSimulation = struct {
         }
         self.quadtree.propagate();
 
-        // Compute Forces using Barnes-Hut
+        // Compute Forces using Barnes-Hut (Parallel)
         const theta_sq = self.quadtree.t_sq;
         const eps_sq = self.quadtree.e_sq;
-        const dt = self.dt;
 
-        for (self.bodies.items) |*b| {
-            b.acc = self.quadtree.acc(b.pos, theta_sq, eps_sq);
+        const bodies_slice = self.bodies.items;
+        const total = bodies_slice.len;
+        // Use a reasonable minimum chunk size to avoid overhead
+        const min_chunk_size = 500;
+        // Heuristic: target 4x jobs per thread for load balancing
+        const thread_count = 12; // Assume 12 threads for now (or discover dynamically if possible, but pool handles it)
+        // Wait, pool is already init-ed. we just spawn jobs.
+
+        const chunk_size = @max(min_chunk_size, total / (thread_count * 4));
+
+        var i: usize = 0;
+        while (i < total) {
+            const end = @min(i + chunk_size, total);
+            const chunk = bodies_slice[i..end];
+            self.pool.spawnWg(&self.wg, calcForcesChunk, .{ &self.quadtree, chunk, theta_sq, eps_sq });
+            i = end;
         }
 
+        self.wg.wait();
+
         // Integrate
+        const dt = self.dt;
         for (self.bodies.items) |*b| {
             b.vel[0] += b.acc[0] * dt;
             b.vel[1] += b.acc[1] * dt;
