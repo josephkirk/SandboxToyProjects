@@ -10,6 +10,24 @@ pub const c = @cImport({
     @cInclude("vulkan/vulkan.h");
 });
 
+// Re-export common Vulkan constants for cleaner API
+pub const VK_FORMAT_R32_SFLOAT = c.VK_FORMAT_R32_SFLOAT;
+pub const VK_FORMAT_R32_UINT = c.VK_FORMAT_R32_UINT;
+pub const VK_DESCRIPTOR_TYPE_STORAGE_IMAGE = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+pub const VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+pub const VK_SHADER_STAGE_COMPUTE_BIT = c.VK_SHADER_STAGE_COMPUTE_BIT;
+pub const VK_SHADER_STAGE_FRAGMENT_BIT = c.VK_SHADER_STAGE_FRAGMENT_BIT;
+pub const VK_SHADER_STAGE_VERTEX_BIT = c.VK_SHADER_STAGE_VERTEX_BIT;
+pub const VK_IMAGE_LAYOUT_GENERAL = c.VK_IMAGE_LAYOUT_GENERAL;
+pub const VK_IMAGE_LAYOUT_UNDEFINED = c.VK_IMAGE_LAYOUT_UNDEFINED;
+pub const VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+pub const VK_PIPELINE_BIND_POINT_COMPUTE = c.VK_PIPELINE_BIND_POINT_COMPUTE;
+pub const VK_PIPELINE_BIND_POINT_GRAPHICS = c.VK_PIPELINE_BIND_POINT_GRAPHICS;
+pub const VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT = c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+pub const VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+pub const VK_ACCESS_SHADER_WRITE_BIT = c.VK_ACCESS_SHADER_WRITE_BIT;
+pub const VK_ACCESS_SHADER_READ_BIT = c.VK_ACCESS_SHADER_READ_BIT;
+
 pub const WindowContext = struct {
     allocator: std.mem.Allocator,
     instance: c.VkInstance,
@@ -1095,6 +1113,91 @@ pub const WindowContext = struct {
         }
 
         c.vkCmdPipelineBarrier(cmdbuf, sourceStage, destinationStage, 0, 0, null, 0, null, 1, &barrier);
+    }
+
+    // Resource destruction helpers
+    pub fn destroyDescriptorPool(self: *WindowContext, pool: c.VkDescriptorPool) void {
+        c.vkDestroyDescriptorPool(self.device, pool, null);
+    }
+
+    pub fn destroyDescriptorSetLayout(self: *WindowContext, layout: c.VkDescriptorSetLayout) void {
+        c.vkDestroyDescriptorSetLayout(self.device, layout, null);
+    }
+
+    pub fn destroyPipelineLayout(self: *WindowContext, layout: c.VkPipelineLayout) void {
+        c.vkDestroyPipelineLayout(self.device, layout, null);
+    }
+
+    pub fn destroyPipeline(self: *WindowContext, pipeline: c.VkPipeline) void {
+        c.vkDestroyPipeline(self.device, pipeline, null);
+    }
+
+    // Pipeline layout creation helper
+    pub fn createPipelineLayout(self: *WindowContext, dsl: c.VkDescriptorSetLayout, push_constant_size: u32, stage_flags: c.VkShaderStageFlags) !c.VkPipelineLayout {
+        const pc_range = c.VkPushConstantRange{
+            .stageFlags = stage_flags,
+            .offset = 0,
+            .size = push_constant_size,
+        };
+
+        const has_pc = push_constant_size > 0;
+        const layout_info = c.VkPipelineLayoutCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = 1,
+            .pSetLayouts = &dsl,
+            .pushConstantRangeCount = if (has_pc) 1 else 0,
+            .pPushConstantRanges = if (has_pc) &pc_range else null,
+        };
+
+        var layout: c.VkPipelineLayout = undefined;
+        if (c.vkCreatePipelineLayout(self.device, &layout_info, null, &layout) != c.VK_SUCCESS) {
+            return error.PipelineLayoutCreationFailed;
+        }
+        return layout;
+    }
+
+    // Command recording helpers
+    pub fn bindComputePipeline(self: *WindowContext, cmdbuf: c.VkCommandBuffer, pipeline: c.VkPipeline) void {
+        _ = self;
+        c.vkCmdBindPipeline(cmdbuf, c.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    }
+
+    pub fn bindGraphicsPipeline(self: *WindowContext, cmdbuf: c.VkCommandBuffer, pipeline: c.VkPipeline) void {
+        _ = self;
+        c.vkCmdBindPipeline(cmdbuf, c.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    }
+
+    pub fn draw(self: *WindowContext, cmdbuf: c.VkCommandBuffer, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) void {
+        _ = self;
+        c.vkCmdDraw(cmdbuf, vertex_count, instance_count, first_vertex, first_instance);
+    }
+
+    pub fn clearImage(self: *WindowContext, cmdbuf: c.VkCommandBuffer, image: c.VkImage, layout: c.VkImageLayout, r: f32, g: f32, b: f32, a: f32) void {
+        _ = self;
+        const clearColor = c.VkClearColorValue{ .float32 = .{ r, g, b, a } };
+        const range = c.VkImageSubresourceRange{
+            .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        };
+        c.vkCmdClearColorImage(cmdbuf, image, layout, &clearColor, 1, &range);
+    }
+
+    pub fn memoryBarrier(self: *WindowContext, cmdbuf: c.VkCommandBuffer, src_stage: c.VkPipelineStageFlags, dst_stage: c.VkPipelineStageFlags, src_access: c.VkAccessFlags, dst_access: c.VkAccessFlags) void {
+        _ = self;
+        var barrier = c.VkMemoryBarrier{
+            .sType = c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = null,
+            .srcAccessMask = src_access,
+            .dstAccessMask = dst_access,
+        };
+        c.vkCmdPipelineBarrier(cmdbuf, src_stage, dst_stage, 0, 1, &barrier, 0, null, 0, null);
+    }
+
+    pub fn waitIdle(self: *WindowContext) void {
+        _ = c.vkDeviceWaitIdle(self.device);
     }
 };
 
