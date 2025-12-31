@@ -213,6 +213,10 @@ public:
     aabb::Tree tree;
     tree.build(volumeBoxes);
 
+    // Step 1: Identify "Seed" Blocks (Content-based)
+    // These are blocks that clearly contain wind or sources.
+    std::vector<uint8_t> seedBlocks(activeBlocks.size(), 0);
+
 #pragma omp parallel for collapse(3)
     for (int bz = 0; bz < blocksZ; ++bz) {
       for (int by = 0; by < blocksY; ++by) {
@@ -233,7 +237,7 @@ public:
             blockBox.max = {maxX, maxY, maxZ};
 
             if (tree.query_overlap(blockBox)) {
-              activeBlocks[idx] = 1;
+              seedBlocks[idx] = 1;
               continue;
             }
           }
@@ -294,7 +298,48 @@ public:
           }
 
         block_active:
-          activeBlocks[idx] = hasVelocity ? 1 : 0;
+          seedBlocks[idx] = hasVelocity ? 1 : 0;
+        }
+      }
+    }
+
+    // Step 2: Dilation (Topology-based)
+    // Activate any block that has an active "Seed" neighbor.
+    // This allows wind to propagate into empty space.
+#pragma omp parallel for collapse(3)
+    for (int bz = 0; bz < blocksZ; ++bz) {
+      for (int by = 0; by < blocksY; ++by) {
+        for (int bx = 0; bx < blocksX; ++bx) {
+          int idx = bx + blocksX * (by + blocksY * bz);
+          if (seedBlocks[idx]) {
+            activeBlocks[idx] = 1;
+            continue;
+          }
+
+          // Check neighbors
+          bool neighborActive = false;
+          for (int dz = -1; dz <= 1; ++dz) {
+            for (int dy = -1; dy <= 1; ++dy) {
+              for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0 && dz == 0)
+                  continue;
+                int nbx = bx + dx;
+                int nby = by + dy;
+                int nbz = bz + dz;
+
+                if (nbx >= 0 && nbx < blocksX && nby >= 0 && nby < blocksY &&
+                    nbz >= 0 && nbz < blocksZ) {
+                  int nidx = nbx + blocksX * (nby + blocksY * nbz);
+                  if (seedBlocks[nidx]) {
+                    neighborActive = true;
+                    goto drift_check_done;
+                  }
+                }
+              }
+            }
+          }
+        drift_check_done:
+          activeBlocks[idx] = neighborActive ? 1 : 0;
         }
       }
     }
