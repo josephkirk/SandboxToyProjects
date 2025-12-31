@@ -60,10 +60,10 @@ impl Quad {
 #[derive(Clone, Debug)]
 pub struct Node {
     /// Index of the first child in the nodes array (0 if leaf).
-    pub children: usize,
+    pub children: u32,
     /// Index of the next sibling (or 0 if last child/root).
     /// Used for traversing the tree without recursion.
-    pub next: usize,
+    pub next: u32,
     /// Center of mass of the node.
     pub pos: Vec2,
     /// Total mass of the node.
@@ -73,7 +73,7 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(next: usize, quad: Quad) -> Self {
+    pub fn new(next: u32, quad: Quad) -> Self {
         Self {
             children: 0,
             next,
@@ -139,7 +139,7 @@ impl Quadtree {
     /// Returns the index of the first child.
     fn subdivide(&mut self, node: usize) -> usize {
         self.parents.push(node);
-        let children = self.nodes.len();
+        let children = self.nodes.len() as u32;
         self.nodes[node].children = children;
 
         // Set up 'next' pointers for the children to link them together
@@ -155,7 +155,7 @@ impl Quadtree {
             self.nodes.push(Node::new(nexts[i], quads[i]));
         }
 
-        return children;
+        return children as usize;
     }
 
     /// Inserts a body (position and mass) into the tree.
@@ -165,7 +165,7 @@ impl Quadtree {
         // Traverse down to a leaf
         while self.nodes[node].is_branch() {
             let quadrant = self.nodes[node].quad.find_quadrant(pos);
-            node = self.nodes[node].children + quadrant;
+            node = (self.nodes[node].children as usize) + quadrant;
         }
 
         // If leaf is empty, just place the body there
@@ -213,14 +213,14 @@ impl Quadtree {
     pub fn propagate(&mut self) {
         // Iterate parents in reverse insertion order (deepest first)
         for &node in self.parents.iter().rev() {
-            let i = self.nodes[node].children;
+            let i = self.nodes[node].children as usize;
 
             // Compute center of mass: (Sum(pos * mass) / TotalMass)
             self.nodes[node].pos = self.nodes[i].pos * self.nodes[i].mass
                 + self.nodes[i + 1].pos * self.nodes[i + 1].mass
                 + self.nodes[i + 2].pos * self.nodes[i + 2].mass
                 + self.nodes[i + 3].pos * self.nodes[i + 3].mass;
-
+            
             self.nodes[node].mass = self.nodes[i].mass
                 + self.nodes[i + 1].mass
                 + self.nodes[i + 2].mass
@@ -254,10 +254,10 @@ impl Quadtree {
                 if n.next == 0 {
                     break;
                 }
-                node = n.next;
+                node = n.next as usize;
             } else {
                 // Node is too close/large, recurse into children
-                node = n.children;
+                node = n.children as usize;
             }
         }
 

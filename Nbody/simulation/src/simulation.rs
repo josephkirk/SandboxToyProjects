@@ -6,10 +6,14 @@ use crate::{
 
 use broccoli::aabb::Rect;
 use ultraviolet::Vec2;
-use rayon::prelude::*;
+use rustfiber::{JobSystem, ParallelSliceMut};
+
+use std::sync::Arc;
+
 
 /// Manages the Barnes-Hut N-body simulation state and logic.
-#[derive(Debug)]
+// #[derive(Debug)] // JobSystem doesn't implement Debug
+
 pub struct Simulation {
     /// Time step per frame.
     pub dt: f32,
@@ -19,7 +23,24 @@ pub struct Simulation {
     pub bodies: Vec<Body>,
     /// The Quadtree used for spatial acceleration of gravitational calculations.
     pub quadtree: Quadtree,
+    /// The JobSystem for parallel execution.
+    pub job_system: Arc<JobSystem>,
 }
+
+impl std::fmt::Debug for Simulation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Simulation")
+            .field("dt", &self.dt)
+            .field("frame", &self.frame)
+            .field("bodies", &self.bodies)
+            .field("quadtree", &self.quadtree)
+            .field("job_system", &"JobSystem")
+            .finish()
+    }
+}
+
+
+
 
 impl Default for Simulation {
     fn default() -> Self {
@@ -52,6 +73,23 @@ impl Simulation {
 
     /// Initializes a new simulation with the given bodies and parameters.
     pub fn with_bodies(bodies: Vec<Body>, dt: f32, theta: f32, epsilon: f32) -> Self {
+        // Use a robust configuration for the job system
+        let job_system = JobSystem::builder()
+            .stack_size(2 * 1024 * 1024) // 2MB stack to match OS threads and prevent overflow
+            .initial_pool_size(32)
+            .target_pool_size(256)
+            .build();
+            
+        Self::with_bodies_and_job_system(bodies, dt, theta, epsilon, Arc::new(job_system))
+    }
+
+    pub fn with_bodies_and_job_system(
+        bodies: Vec<Body>, 
+        dt: f32, 
+        theta: f32, 
+        epsilon: f32, 
+        job_system: Arc<JobSystem>
+    ) -> Self {
         let quadtree = Quadtree::new(theta, epsilon);
 
         Self {
@@ -59,6 +97,7 @@ impl Simulation {
             frame: 0,
             bodies,
             quadtree,
+            job_system,
         }
     }
 
@@ -71,6 +110,9 @@ impl Simulation {
     /// Advances the simulation by one step.
     /// This includes updating positions (iterate), handling collisions, and calculating gravitational forces (attract).
     pub fn step(&mut self) {
+        // Signal start of frame to reset per-frame allocators (prevents memory leaks)
+        self.job_system.start_new_frame();
+
         self.iterate();
         self.collide();
         self.attract();
@@ -90,17 +132,21 @@ impl Simulation {
         }
 
         self.quadtree.propagate();
-        
+
         let quadtree = &self.quadtree;
-        self.bodies.par_iter_mut().for_each(|body| {
-            body.acc = quadtree.acc(body.pos);
+        
+        // Use the new safe parallel iterator API
+        self.bodies.fiber_iter_mut(&self.job_system).for_each(move |body| {
+             body.acc = quadtree.acc(body.pos);
         });
     }
 
     /// Updates the position and velocity of all bodies based on their current acceleration and time step.
     pub fn iterate(&mut self) {
         let dt = self.dt;
-        self.bodies.par_iter_mut().for_each(|body| {
+        // self.bodies.iter_mut().for_each(|body| body.update(dt)); // sequential fallback for comparison? no.
+        
+        self.bodies.fiber_iter_mut(&self.job_system).for_each(move |body| {
             body.update(dt);
         });
     }

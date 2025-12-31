@@ -82,14 +82,17 @@ const SimState = struct {
                 self.body_count = Simulation_GetBodyCount(self.handle);
                 const bodies = Simulation_GetBodies(self.handle);
                 if (self.body_count > self.render_bodies.len) {
-                    // Realloc if needed (omitted for brevity, 200k is enough)
+                    self.allocator.free(self.render_bodies);
+                    // alloc or panic
+                    self.render_bodies = self.allocator.alloc(Body, self.body_count + 100_000) catch @panic("OOM");
                 }
                 @memcpy(self.render_bodies[0..self.body_count], bodies[0..self.body_count]);
 
                 self.node_count = Simulation_GetNodeCount(self.handle);
                 const nodes = Simulation_GetNodes(self.handle);
                 if (self.node_count > self.render_nodes.len) {
-                    // Realloc if needed
+                    self.allocator.free(self.render_nodes);
+                    self.render_nodes = self.allocator.alloc(Node, self.node_count + 100_000) catch @panic("OOM");
                 }
                 @memcpy(self.render_nodes[0..self.node_count], nodes[0..self.node_count]);
             }
