@@ -1,10 +1,12 @@
+#![allow(unused)]
+
 use crate::{
     body::Body,
     quadtree::{Quad, Quadtree},
     utils,
 };
 
-use broccoli::aabb::Rect;
+use broccoli::{aabb::Rect, Tree};
 use ultraviolet::Vec2;
 use rustfiber::{JobSystem, ParallelSliceMut};
 use rayon::prelude::*;
@@ -131,15 +133,12 @@ impl Simulation {
     }
 
     /// Calculates gravitational forces (acceleration) for all bodies using the Barnes-Hut algorithm.
-    /// 1. Rebuilds the Quadtree from current body positions.
-    /// 2. Propagates center of mass information up the tree.
-    /// 3. Approximates forces for each body using the tree.
     pub fn attract(&mut self) {
         let quad = Quad::new_containing(&self.bodies);
         self.quadtree.clear(quad);
 
-        for body in &self.bodies {
-            self.quadtree.insert(body.pos, body.mass);
+        for (i, body) in self.bodies.iter().enumerate() {
+            self.quadtree.insert(body.pos, body.mass, i);
         }
 
         self.quadtree.propagate();
@@ -150,27 +149,22 @@ impl Simulation {
                   body.acc = quadtree.acc(body.pos);
              });
         } else {
-             // Optimized RustFiber path with manual chunking to match Zig's performance
+             // Optimized RustFiber path with manual chunking
              let len = self.bodies.len();
              if len == 0 { return; }
 
              let bodies_ptr = self.bodies.as_mut_ptr() as usize;
              let quadtree_ptr = &self.quadtree as *const Quadtree as usize;
 
-             // SAFETY:
-             // 1. We access non-overlapping ranges of `bodies` (guaranteed by job system partitioner)
-             // 2. `quadtree` is read-only
              let counter = self.job_system.parallel_for_chunked_with_hint(
                  0..len,
-                 rustfiber::GranularityHint::Light, // Target ~4 jobs per worker
+                 rustfiber::GranularityHint::Light, 
                  move |range| {
                      unsafe {
                          let bodies = std::slice::from_raw_parts_mut(bodies_ptr as *mut Body, len);
                          let qt = &*(quadtree_ptr as *const Quadtree);
                          
                          for i in range {
-                             // Use get_unchecked for the bodies array inside the known valid range
-                             // (Though iterator elision should handle this, specific indices help)
                              bodies.get_unchecked_mut(i).acc = qt.acc(bodies.get_unchecked(i).pos);
                          }
                      }
@@ -183,7 +177,6 @@ impl Simulation {
     /// Updates the position and velocity of all bodies based on their current acceleration and time step.
     pub fn iterate(&mut self) {
         let dt = self.dt;
-        // self.bodies.iter_mut().for_each(|body| body.update(dt)); // sequential fallback for comparison? no.
         
         if self.use_rayon {
              self.bodies.par_iter_mut().for_each(|body| {
@@ -212,7 +205,7 @@ impl Simulation {
             })
             .collect::<Vec<_>>();
 
-        let mut broccoli = broccoli::Tree::new(&mut rects);
+        let mut broccoli = Tree::new(&mut rects);
 
         broccoli.find_colliding_pairs(|i, j| {
             let i = *i.unpack_inner();
@@ -290,4 +283,7 @@ impl Simulation {
         self.bodies[i].pos += v1 * t;
         self.bodies[j].pos += v2 * t;
     }
+    
+    // Removed old resolve/collide methods.
+
 }

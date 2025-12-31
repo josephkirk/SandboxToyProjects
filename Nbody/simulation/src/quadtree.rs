@@ -54,15 +54,12 @@ impl Quad {
     }
 }
 
-/// Represents a node in the Quadtree.
-/// Can be a leaf (holding a body) or a branch (holding children).
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct Node {
     /// Index of the first child in the nodes array (0 if leaf).
     pub children: u32,
     /// Index of the next sibling (or 0 if last child/root).
-    /// Used for traversing the tree without recursion.
     pub next: u32,
     /// Center of mass of the node.
     pub pos: Vec2,
@@ -70,6 +67,8 @@ pub struct Node {
     pub mass: f32,
     /// Spatial bounds of the node.
     pub quad: Quad,
+    /// External body index (only valid if is_leaf() and mass > 0).
+    pub body_index: u32,
 }
 
 impl Node {
@@ -80,6 +79,7 @@ impl Node {
             pos: Vec2::zero(),
             mass: 0.0,
             quad,
+            body_index: u32::MAX,
         }
     }
 
@@ -159,7 +159,7 @@ impl Quadtree {
     }
 
     /// Inserts a body (position and mass) into the tree.
-    pub fn insert(&mut self, pos: Vec2, mass: f32) {
+    pub fn insert(&mut self, pos: Vec2, mass: f32, body_index: usize) {
         let mut node = Self::ROOT;
 
         // Traverse down to a leaf
@@ -172,11 +172,13 @@ impl Quadtree {
         if self.nodes[node].is_empty() {
             self.nodes[node].pos = pos;
             self.nodes[node].mass = mass;
+            self.nodes[node].body_index = body_index as u32;
             return;
         }
 
         // Handle collision (leaf already occupied)
         let (p, m) = (self.nodes[node].pos, self.nodes[node].mass);
+        let idx = self.nodes[node].body_index;
         
         // If positions are identical, just add mass (merge bodies/star collision)
         if pos == p {
@@ -201,8 +203,11 @@ impl Quadtree {
 
                 self.nodes[n1].pos = p;
                 self.nodes[n1].mass = m;
+                self.nodes[n1].body_index = idx;
+                
                 self.nodes[n2].pos = pos;
                 self.nodes[n2].mass = mass;
+                self.nodes[n2].body_index = body_index as u32;
                 return;
             }
         }
@@ -227,7 +232,9 @@ impl Quadtree {
                 + self.nodes[i + 3].mass;
 
             let mass = self.nodes[node].mass;
-            self.nodes[node].pos /= mass;
+            if mass > 0.0 {
+                self.nodes[node].pos /= mass;
+            }
         }
     }
 
@@ -272,5 +279,46 @@ impl Quadtree {
         }
 
         acc
+    }
+
+    /// Finds potential collisions for a body using the quadtree.
+    /// Calls `callback` for each potential collision candidate (index).
+    #[inline(always)]
+    pub fn find_collisions(&self, body_idx: u32, pos: Vec2, radius: f32, mut callback: impl FnMut(u32)) {
+        if self.nodes.is_empty() { return; }
+        
+        // AABB of the query body
+        let min = pos - Vec2::broadcast(radius);
+        let max = pos + Vec2::broadcast(radius);
+
+        let mut node_idx = Self::ROOT;
+        
+        loop {
+            let n = unsafe { self.nodes.get_unchecked(node_idx) };
+
+            // Check AABB overlap with node quad
+            let q_half = n.quad.size * 0.5;
+            let q_min = n.quad.center - Vec2::broadcast(q_half);
+            let q_max = n.quad.center + Vec2::broadcast(q_half);
+
+            // Simple AABB overlap check
+            if max.x > q_min.x && min.x < q_max.x && max.y > q_min.y && min.y < q_max.y {
+                if n.is_leaf() {
+                    let n_idx = n.body_index;
+                     if n.mass > 0.0 && n_idx != u32::MAX && n_idx != body_idx {
+                        callback(n_idx);
+                     }
+                    
+                    if n.next == 0 { break; }
+                    node_idx = n.next as usize;
+                } else {
+                    node_idx = n.children as usize;
+                }
+            } else {
+                // No overlap, skip children
+                if n.next == 0 { break; }
+                node_idx = n.next as usize;
+            }
+        }
     }
 }
