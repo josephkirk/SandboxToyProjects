@@ -12,52 +12,29 @@ AVampireSurvivalGameMode::AVampireSurvivalGameMode() {
 }
 
 void AVampireSurvivalGameMode::BeginPlay() {
-  Super::BeginPlay();
+  Super::BeginPlay(); // Handles generic connection
 
   UGameInstance *GameInstance = GetGameInstance();
   if (GameInstance) {
     Subsystem = GameInstance->GetSubsystem<UVampireSurvivalSubsystem>();
-    UOdinClientSubsystem* OdinSys = GameInstance->GetSubsystem<UOdinClientSubsystem>();
-    
-    if (Subsystem && OdinSys) {
-      // Bind delegates from OdinSys
-      OdinSys->OnConnected.AddDynamic(this, &AVampireSurvivalGameMode::OnConnectedCallback);
-      //OdinSys->OnDisconnected.AddDynamic(this, &AVampireSurvivalGameMode::OnDisconnectedCallback); 
-      // Need impl for Disconnected callback binding if we want it
-
-      // Try to connect logic is inside Subsystem->Connect or we call it here?
-      if (Subsystem->ConnectToOdin()) {
-         // Log handled in Connect
-      }
-    }
   }
-}
-
-void AVampireSurvivalGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason) {
-  Super::EndPlay(EndPlayReason);
 }
 
 void AVampireSurvivalGameMode::Tick(float DeltaTime) {
   Super::Tick(DeltaTime);
 
-  if (!Subsystem || !Subsystem->IsConnected()) {
-    return;
-  }
-
-  // Send current input every tick
-  if (!CurrentMoveInput.IsNearlyZero()) {
+  // Send current input every tick (specific to this game mode)
+  if (Subsystem && !CurrentMoveInput.IsNearlyZero()) {
     Subsystem->SendPlayerInput(CurrentMoveInput.X, CurrentMoveInput.Y);
   }
+}
 
-  // Poll game state at configured rate
-  StatePollingTimer += DeltaTime;
-  if (StatePollingTimer >= StatePollingInterval) {
-    StatePollingTimer = 0.0f;
+void AVampireSurvivalGameMode::OnUpdateGameState() {
+    if (!Subsystem) return;
 
     // Get struct (Update happens inside GetLatestGameState if logic moved, or we call accessor)
-    // We changed Subsystem to return const ref, so we copy it to CachedGameState for BP exposure?
-    // Or just ref it.
-    CachedGameState = Subsystem->GetLatestGameState();
+    const FGameStateWrapper& Latest = Subsystem->UpdateAndGetState();
+    CachedGameState = Latest; // Copy for Blueprint access if needed, or just use ref if careful
     
     // Access fields directly from struct
     FVector2D PlayerPos = CachedGameState.Player.Position;
@@ -67,7 +44,6 @@ void AVampireSurvivalGameMode::Tick(float DeltaTime) {
     bool bActive = CachedGameState.Is_Active;
 
     OnGameStateReceived(PlayerPos, Health, CachedGameState.Score, ECount, bActive);
-  }
 }
 
 void AVampireSurvivalGameMode::HandleMoveInput(FVector2D MoveInput) {
@@ -81,6 +57,3 @@ void AVampireSurvivalGameMode::StartOdinGame() {
 void AVampireSurvivalGameMode::EndOdinGame() {
   if (Subsystem) Subsystem->SendEndGame();
 }
-
-void AVampireSurvivalGameMode::OnConnectedCallback() { OnOdinConnected(); }
-// void AVampireSurvivalGameMode::OnDisconnectedCallback() { OnOdinDisconnected(); }

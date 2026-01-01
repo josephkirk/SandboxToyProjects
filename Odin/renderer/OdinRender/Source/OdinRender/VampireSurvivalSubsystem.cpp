@@ -8,25 +8,8 @@
 #include "flatbuffers/flatbuffers.h"
 #include "Generated/GameState_flatbuffer.h"
 
-void UVampireSurvivalSubsystem::Initialize(FSubsystemCollectionBase& Collection) {
-    Super::Initialize(Collection);
-    OdinClient = Collection.InitializeDependency<UOdinClientSubsystem>();
-    UE_LOG(LogTemp, Log, TEXT("VampireSurvivalSubsystem initialized"));
-}
-
-void UVampireSurvivalSubsystem::Deinitialize() {
-    Super::Deinitialize();
-}
-
-bool UVampireSurvivalSubsystem::IsConnected() const {
-    return OdinClient && OdinClient->IsConnected();
-}
-
-bool UVampireSurvivalSubsystem::ConnectToOdin() {
-    if (OdinClient) {
-        return OdinClient->ConnectToOdin(TEXT("OdinVampireSurvival"));
-    }
-    return false;
+bool UVampireSurvivalSubsystem::ConnectToOdinDefault() {
+    return ConnectToOdin(TEXT("OdinVampireSurvival"));
 }
 
 void UVampireSurvivalSubsystem::SendStartGame() {
@@ -42,12 +25,9 @@ void UVampireSurvivalSubsystem::SendPlayerInput(float MoveX, float MoveY) {
 }
 
 const FGameStateWrapper& UVampireSurvivalSubsystem::UpdateAndGetState() {
-    if (!OdinClient) return CurrentGameState;
-
-    const FOdinSharedMemoryBlock::FrameSlot* Slot = OdinClient->GetLatestFrameSlot();
-    if (!Slot) return CurrentGameState;
-
-    if (static_cast<int32>(Slot->FrameNumber) <= LastReadFrameNumber) {
+    const FOdinSharedMemoryBlock::FrameSlot* Slot = TryGetNewFrameSlot();
+    
+    if (!Slot) {
         return CurrentGameState;
     }
 

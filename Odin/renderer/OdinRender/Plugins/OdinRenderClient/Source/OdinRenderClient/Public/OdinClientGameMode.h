@@ -26,6 +26,14 @@ protected:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "OdinClient")
     FString SharedMemoryName = TEXT("OdinVampireSurvival"); // Default, override in BP
 
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "OdinClient")
+    float StatePollingInterval = 0.016f;
+
+    float StatePollingTimer = 0.0f;
+
+    // Virtual function to be implemented by child classes to fetch and process game state
+    virtual void OnUpdateGameState();
+
     UFUNCTION()
     void HandleConnected();
 
@@ -37,4 +45,7 @@ protected:
 
     UFUNCTION(BlueprintImplementableEvent, Category = "OdinClient")
     void OnOdinDisconnected();
+
+    // Tick for polling
+    virtual void Tick(float DeltaTime) override;
 };

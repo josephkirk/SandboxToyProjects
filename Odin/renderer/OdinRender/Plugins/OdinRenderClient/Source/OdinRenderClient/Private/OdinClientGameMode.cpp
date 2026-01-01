@@ -34,5 +34,21 @@ void AOdinClientGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason) {
     Super::EndPlay(EndPlayReason);
 }
 
+void AOdinClientGameMode::Tick(float DeltaTime) {
+    Super::Tick(DeltaTime);
+
+    if (OdinSubsystem && OdinSubsystem->IsConnected()) {
+        StatePollingTimer += DeltaTime;
+        if (StatePollingTimer >= StatePollingInterval) {
+            StatePollingTimer = 0.0f;
+            OnUpdateGameState();
+        }
+    }
+}
+
+void AOdinClientGameMode::OnUpdateGameState() {
+    // Override in subclass
+}
+
 void AOdinClientGameMode::HandleConnected() { OnOdinConnected(); }
 void AOdinClientGameMode::HandleDisconnected() { OnOdinDisconnected(); }

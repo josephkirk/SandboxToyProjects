@@ -5,24 +5,19 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Subsystems/GameInstanceSubsystem.h"
-#include "OdinClientSubsystem.h"
+#include "OdinLinkedSubsystem.h"
 #include "Generated/GameStateWrappers.h"
 #include "VampireSurvivalSubsystem.generated.h"
 
 UCLASS()
-class ODINRENDER_API UVampireSurvivalSubsystem : public UGameInstanceSubsystem {
+class ODINRENDER_API UVampireSurvivalSubsystem : public UOdinLinkedSubsystem {
     GENERATED_BODY()
 
 public:
-    virtual void Initialize(FSubsystemCollectionBase& Collection) override;
-    virtual void Deinitialize() override;
-
-    UFUNCTION(BlueprintPure, Category = "VampireSurvival")
-    bool IsConnected() const;
+    // Initialize handled by Base (Dependency Injection)
 
     UFUNCTION(BlueprintCallable, Category = "VampireSurvival")
-    bool ConnectToOdin(); // Helper to connect via generic subsystem
+    bool ConnectToOdinDefault(); // Helper for default name
 
     UFUNCTION(BlueprintCallable, Category = "VampireSurvival")
     void SendStartGame();
@@ -35,9 +30,6 @@ public:
 
     const FGameStateWrapper& UpdateAndGetState();
 
-    // Typed State Access - Returns copy for BP or reference
-    // Better to return by const ref for C++, but for BP we might need value or const ref wrapper?
-    // USTRUCTs in BP are passed by value usually.
     UFUNCTION(BlueprintPure, Category = "VampireSurvival")
     const FGameStateWrapper& GetLatestGameState() const;
 
@@ -45,11 +37,6 @@ public:
     int32 GetLatestFrameNumber() const { return LastReadFrameNumber; }
 
 private:
-    UPROPERTY()
-    UOdinClientSubsystem* OdinClient = nullptr;
-
     UPROPERTY(BlueprintReadOnly, Category = "VampireSurvival", meta = (AllowPrivateAccess = "true"))
     FGameStateWrapper CurrentGameState;
-    
-    int32 LastReadFrameNumber = -1;
 };

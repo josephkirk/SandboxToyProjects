@@ -6,32 +6,30 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/GameModeBase.h"
+#include "OdinClientGameMode.h"
 #include "Generated/GameStateWrappers.h"
 #include "VampireSurvivalGameMode.generated.h"
 
 class UVampireSurvivalSubsystem;
 
 UCLASS()
-class ODINRENDER_API AVampireSurvivalGameMode : public AGameModeBase {
+class ODINRENDER_API AVampireSurvivalGameMode : public AOdinClientGameMode {
   GENERATED_BODY()
 
 public:
   AVampireSurvivalGameMode();
 
   virtual void BeginPlay() override;
-  virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
   virtual void Tick(float DeltaTime) override;
+  // EndPlay handled by Parent
+
+  // Override Generic Upgrade
+  virtual void OnUpdateGameState() override;
 
   // Blueprint Events
   UFUNCTION(BlueprintImplementableEvent, Category = "VampireSurvival")
   void OnGameStateReceived(FVector2D PlayerPosition, int32 PlayerHealth,
                            int32 Score, int32 EnemyCount, bool bIsActive);
-
-  UFUNCTION(BlueprintImplementableEvent, Category = "VampireSurvival")
-  void OnOdinConnected();
-
-  UFUNCTION(BlueprintImplementableEvent, Category = "VampireSurvival")
-  void OnOdinDisconnected();
 
   // Input handling
   UFUNCTION(BlueprintCallable, Category = "VampireSurvival")
@@ -53,17 +51,10 @@ protected:
 
   FVector2D CurrentMoveInput;
 
-  UPROPERTY(EditDefaultsOnly, Category = "VampireSurvival")
-  float StatePollingInterval = 0.016f;
-
-  float StatePollingTimer = 0.0f;
-
   UPROPERTY(BlueprintReadOnly, Category = "VampireSurvival")
   FGameStateWrapper CachedGameState;
 
-private:
-  UFUNCTION()
-  void OnConnectedCallback(); // Bound to Subsystem delegate
+
   
   // Note: Subsystem now handles delegating connection events
 };
