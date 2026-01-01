@@ -37,15 +37,6 @@ table Enemy {
   id: int;
 }
 
-// ========== Enums ==========
-
-enum GameEventType : int {
-  None = 0,
-  StartGame = 1,
-  EndGame = 2,
-  PlayerInput = 3
-}
-
 // ========== Root GameState ==========
 // Only holds game-level metadata, not entity data
 table GameState {

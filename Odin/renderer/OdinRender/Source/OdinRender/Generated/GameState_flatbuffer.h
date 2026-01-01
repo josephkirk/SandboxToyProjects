@@ -30,42 +30,6 @@ struct GameState;
 struct GameStateBuilder;
 struct GameStateT;
 
-enum class GameEventType : int32_t {
-  None = 0,
-  StartGame = 1,
-  EndGame = 2,
-  PlayerInput = 3,
-  MIN = None,
-  MAX = PlayerInput
-};
-
-inline const GameEventType (&EnumValuesGameEventType())[4] {
-  static const GameEventType values[] = {
-    GameEventType::None,
-    GameEventType::StartGame,
-    GameEventType::EndGame,
-    GameEventType::PlayerInput
-  };
-  return values;
-}
-
-inline const char * const *EnumNamesGameEventType() {
-  static const char * const names[5] = {
-    "None",
-    "StartGame",
-    "EndGame",
-    "PlayerInput",
-    nullptr
-  };
-  return names;
-}
-
-inline const char *EnumNameGameEventType(GameEventType e) {
-  if (::flatbuffers::IsOutRange(e, GameEventType::None, GameEventType::PlayerInput)) return "";
-  const size_t index = static_cast<size_t>(e);
-  return EnumNamesGameEventType()[index];
-}
-
 FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) Vec3 FLATBUFFERS_FINAL_CLASS {
  private:
   float x_;

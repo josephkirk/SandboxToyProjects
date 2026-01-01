@@ -69,20 +69,80 @@ const FOdinSharedMemoryBlock::FrameSlot* UOdinClientSubsystem::GetLatestFrameSlo
     return &SharedMemory->Frames[LatestIndex];
 }
 
-bool UOdinClientSubsystem::SendEvent(int32 Type, float P1, float P2) {
-    if (!SharedMemory) return false;
+// ========================================
+// Command Buffer Implementation
+// ========================================
 
-    // Atomic generic event push
-    int32 Head = FPlatformAtomics::AtomicRead(&SharedMemory->EventHead);
-    int32 Tail = FPlatformAtomics::AtomicRead(&SharedMemory->EventTail);
-    int32 NextHead = (Head + 1) % ODIN_EVENT_QUEUE_SIZE;
+FOdinCommand UOdinClientSubsystem::MakeCommand(uint8 Type, float V0, float V1, float V2, float V3, const FString& Data) {
+    FOdinCommand Cmd;
+    FMemory::Memzero(&Cmd, sizeof(FOdinCommand));
+    
+    Cmd.Type = Type;
+    Cmd.Values[0] = V0;
+    Cmd.Values[1] = V1;
+    Cmd.Values[2] = V2;
+    Cmd.Values[3] = V3;
+    
+    // Copy string data
+    FTCHARToUTF8 Utf8Data(*Data);
+    int32 DataLen = FMath::Min(Utf8Data.Length(), ODIN_COMMAND_DATA_SIZE);
+    FMemory::Memcpy(Cmd.Data, Utf8Data.Get(), DataLen);
+    Cmd.DataLength = static_cast<uint16>(DataLen);
+    
+    return Cmd;
+}
 
-    if (NextHead == Tail) return false; // Full
-
-    SharedMemory->Events[Head].EventType = Type;
-    SharedMemory->Events[Head].Param1 = P1;
-    SharedMemory->Events[Head].Param2 = P2;
-
-    FPlatformAtomics::InterlockedExchange(&SharedMemory->EventHead, NextHead);
+bool UOdinClientSubsystem::PushCommand(TOdinCommandRing<ODIN_INPUT_RING_SIZE>& Ring, const FOdinCommand& Cmd) {
+    int32 Head = FPlatformAtomics::AtomicRead(&Ring.Head);
+    int32 Tail = FPlatformAtomics::AtomicRead(&Ring.Tail);
+    int32 NextHead = (Head + 1) % ODIN_INPUT_RING_SIZE;
+    
+    if (NextHead == Tail) {
+        return false; // Full
+    }
+    
+    Ring.Commands[Head] = Cmd;
+    FPlatformAtomics::InterlockedExchange(&Ring.Head, NextHead);
     return true;
+}
+
+bool UOdinClientSubsystem::PopCommand(TOdinCommandRing<ODIN_ENTITY_RING_SIZE>& Ring, FOdinCommand& OutCmd) {
+    int32 Head = FPlatformAtomics::AtomicRead(&Ring.Head);
+    int32 Tail = FPlatformAtomics::AtomicRead(&Ring.Tail);
+    
+    if (Head == Tail) {
+        return false; // Empty
+    }
+    
+    OutCmd = Ring.Commands[Tail];
+    FPlatformAtomics::InterlockedExchange(&Ring.Tail, (Tail + 1) % ODIN_ENTITY_RING_SIZE);
+    return true;
+}
+
+bool UOdinClientSubsystem::PushInputCommand(FName InputName, float AxisX, float AxisY, float Button) {
+    if (!SharedMemory) return false;
+    
+    FOdinCommand Cmd = MakeCommand(ODIN_CMD_INPUT, AxisX, AxisY, Button, 0.f, InputName.ToString());
+    return PushCommand(SharedMemory->InputRing, Cmd);
+}
+
+bool UOdinClientSubsystem::PushGameCommand(float GameState, FName StateName) {
+    if (!SharedMemory) return false;
+    
+    FOdinCommand Cmd = MakeCommand(ODIN_CMD_GAME, GameState, 0.f, 0.f, 0.f, StateName.ToString());
+    return PushCommand(SharedMemory->InputRing, Cmd);
+}
+
+bool UOdinClientSubsystem::HasEntityCommand() const {
+    if (!SharedMemory) return false;
+    
+    int32 Head = FPlatformAtomics::AtomicRead(&SharedMemory->EntityRing.Head);
+    int32 Tail = FPlatformAtomics::AtomicRead(&SharedMemory->EntityRing.Tail);
+    return Head != Tail;
+}
+
+bool UOdinClientSubsystem::PopEntityCommand(FOdinCommand& OutCommand) {
+    if (!SharedMemory) return false;
+    
+    return PopCommand(SharedMemory->EntityRing, OutCommand);
 }

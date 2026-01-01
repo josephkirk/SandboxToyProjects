@@ -5,31 +5,55 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "OdinClientTypes.generated.h"
 
 // Ring Buffer Constants
 #define ODIN_RING_BUFFER_SIZE 64
+#define ODIN_INPUT_RING_SIZE 16
+#define ODIN_ENTITY_RING_SIZE 64
 #define ODIN_EVENT_QUEUE_SIZE 16
-
-// Max frame size defined here for generic buffer, must match Odin writer
 #define ODIN_MAX_FRAME_SIZE (1024 * 16)
+#define ODIN_COMMAND_DATA_SIZE 20
 
-// Generic Event Structure
-USTRUCT(BlueprintType)
-struct FOdinGameEvent {
-    GENERATED_BODY()
+// Command Type Bit Flags
+// Direction bits (high nibble)
+#define ODIN_CMD_DIR_CLIENT_TO_GAME  0x80
+#define ODIN_CMD_DIR_GAME_TO_CLIENT  0x40
 
-    UPROPERTY(BlueprintReadWrite, Category = "Odin")
-    int32 EventType;
-    
-    UPROPERTY(BlueprintReadWrite, Category = "Odin")
-    float Param1;
-    
-    UPROPERTY(BlueprintReadWrite, Category = "Odin")
-    float Param2;
+// Client -> Game Commands (0x8X)
+#define ODIN_CMD_INPUT           0x81  // Data: input_name, Values: axis/button
+#define ODIN_CMD_GAME            0x82  // Values[0]: 1=start, -1=end, 0=state; Data: state_name
+
+// Game -> Client Commands (0x4X)
+#define ODIN_CMD_ENTITY_SPAWN    0x41  // Data: class, Values: x,y,z,yaw
+#define ODIN_CMD_ENTITY_DESTROY  0x42  // Data: entityId
+#define ODIN_CMD_ENTITY_UPDATE   0x43  // Data: serialized FB, Values: x,y,z,visible
+#define ODIN_CMD_PLAYER_UPDATE   0x44  // Data: serialized FB, Values: x,y,z,visible
+#define ODIN_CMD_PLAYER_ACTION   0x45  // Data: serialized FB (skill/ability)
+#define ODIN_CMD_EVENT_GAMEPLAY  0x46  // Data: cue_name, Values: params
+
+// Unified Command Structure (40 bytes)
+#pragma pack(push, 1)
+struct FOdinCommand {
+    uint8 Type;                          // Command type (bit flags)
+    uint8 Flags;                         // Reserved for future use
+    uint16 DataLength;                   // Length of valid data in Data field
+    float Values[4];                     // Generic float4 (position, axis, params)
+    char Data[ODIN_COMMAND_DATA_SIZE];   // Name, ID, or serialized FlatBuffer
 };
+#pragma pack(pop)
+static_assert(sizeof(FOdinCommand) == 40, "FOdinCommand must be 40 bytes");
 
-// Generic Shared Memory Layout (Header + Data Slots)
+// Command Ring Buffer
+#pragma pack(push, 1)
+template<int32 Size>
+struct TOdinCommandRing {
+    volatile int32 Head;
+    volatile int32 Tail;
+    FOdinCommand Commands[Size];
+};
+#pragma pack(pop)
+
+// Shared Memory Layout
 struct FOdinSharedMemoryBlock {
 
     struct FrameSlot {
@@ -42,8 +66,7 @@ struct FOdinSharedMemoryBlock {
     FrameSlot Frames[ODIN_RING_BUFFER_SIZE];
     int32 LatestFrameIndex; // Atomic
 
-    // Event Queue (Unreal -> Odin)
-    FOdinGameEvent Events[ODIN_EVENT_QUEUE_SIZE];
-    int32 EventHead;
-    int32 EventTail;
+    // Command Rings (unified command system)
+    TOdinCommandRing<ODIN_INPUT_RING_SIZE> InputRing;   // Client -> Game
+    TOdinCommandRing<ODIN_ENTITY_RING_SIZE> EntityRing; // Game -> Client
 };

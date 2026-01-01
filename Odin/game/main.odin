@@ -19,6 +19,42 @@ import gen "./generated"
 MAX_ENEMIES :: 100
 RING_BUFFER_SIZE :: 64
 EVENT_QUEUE_SIZE :: 16
+INPUT_RING_SIZE :: 16
+ENTITY_RING_SIZE :: 64
+COMMAND_DATA_SIZE :: 20
+
+// Command Type Constants (matches C++ bit flags)
+ODIN_CMD_DIR_CLIENT_TO_GAME :: 0x80
+ODIN_CMD_DIR_GAME_TO_CLIENT :: 0x40
+
+// Client -> Game (0x8X)
+ODIN_CMD_INPUT          :: 0x81  // Data: input_name, Values: axis/button
+ODIN_CMD_GAME           :: 0x82  // Values[0]: 1=start, -1=end, 0=state
+
+// Game -> Client (0x4X)
+ODIN_CMD_ENTITY_SPAWN   :: 0x41  // Data: class, Values: x,y,z,yaw
+ODIN_CMD_ENTITY_DESTROY :: 0x42  // Data: entityId
+ODIN_CMD_ENTITY_UPDATE  :: 0x43  // Data: serialized FB, Values: x,y,z,visible
+ODIN_CMD_PLAYER_UPDATE  :: 0x44  // Data: serialized FB, Values: x,y,z,visible
+ODIN_CMD_PLAYER_ACTION  :: 0x45  // Data: serialized FB (skill/ability)
+ODIN_CMD_EVENT_GAMEPLAY :: 0x46  // Data: cue_name, Values: params
+
+// Unified Command Structure (40 bytes, matches C++)
+OdinCommand :: struct #packed {
+    type: u8,                            // Command type (bit flags)
+    flags: u8,                           // Reserved
+    data_length: u16,                    // Length of valid data
+    values: [4]f32,                      // Generic float4
+    data: [COMMAND_DATA_SIZE]u8,         // Name, ID, or serialized FB
+}
+#assert(size_of(OdinCommand) == 40, "OdinCommand must be 40 bytes")
+
+// Command Ring Buffer
+CommandRing :: struct($Size: i32) #packed {
+    head: i32,  // Atomic write index
+    tail: i32,  // Atomic read index  
+    commands: [Size]OdinCommand,
+}
 
 Vector2 :: struct #packed {
     x: f32,
@@ -58,26 +94,13 @@ FrameSlot :: struct #packed {
     data: [MAX_FRAME_SIZE]u8,
 }
 
-// Keep GameEventType and GameEvent as packed structs for now (Input)
-GameEventType :: enum i32 {
-    None = 0,
-    StartGame = 1,
-    EndGame = 2,
-    PlayerInput = 3,
-}
-
-GameEvent :: struct #packed {
-    event_type: GameEventType,
-    move_x: f32,
-    move_y: f32,
-}
-
 SharedMemoryBlock :: struct #packed {
     frames: [RING_BUFFER_SIZE]FrameSlot,
     latest_frame_index: i32,
-    events: [EVENT_QUEUE_SIZE]GameEvent,
-    event_head: i32,
-    event_tail: i32,
+    
+    // Command Rings (unified command system)
+    input_ring: CommandRing(INPUT_RING_SIZE),   // Client -> Game
+    entity_ring: CommandRing(ENTITY_RING_SIZE), // Game -> Client
 }
 
 // ============================================================================
@@ -101,6 +124,7 @@ Config :: struct {
     debug_mode: bool,
     headless: bool,
     verbose: bool,
+    debug_logging: bool,
 }
 
 g_config: Config
@@ -535,31 +559,118 @@ update_game :: proc(state: ^LocalGameState, dt: f32) {
 }
 
 // ============================================================================
-// Event Processing (For Unreal Client)
+// Command Buffer Functions (New Unified System)
 // ============================================================================
 
-process_events :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState) {
-    for {
-        tail := sync.atomic_load(&smh.event_tail)
-        head := sync.atomic_load(&smh.event_head)
+// Check if there are pending input commands from client
+has_input_command :: proc(smh: ^SharedMemoryBlock) -> bool {
+    head := sync.atomic_load(&smh.input_ring.head)
+    tail := sync.atomic_load(&smh.input_ring.tail)
+    return head != tail
+}
+
+// Pop an input command from the ring buffer
+pop_input_command :: proc(smh: ^SharedMemoryBlock) -> (OdinCommand, bool) {
+    tail := sync.atomic_load(&smh.input_ring.tail)
+    head := sync.atomic_load(&smh.input_ring.head)
+    
+    if tail == head {
+        return {}, false  // Empty
+    }
+    
+    cmd := smh.input_ring.commands[tail % INPUT_RING_SIZE]
+    sync.atomic_store(&smh.input_ring.tail, (tail + 1) % INPUT_RING_SIZE)
+    return cmd, true
+}
+
+// Push an entity command to the ring buffer (Game -> Client)
+push_entity_command :: proc(smh: ^SharedMemoryBlock, cmd: OdinCommand) -> bool {
+    head := sync.atomic_load(&smh.entity_ring.head)
+    tail := sync.atomic_load(&smh.entity_ring.tail)
+    next_head := (head + 1) % ENTITY_RING_SIZE
+    
+    if next_head == tail {
+        return false  // Full
+    }
+    
+    smh.entity_ring.commands[head] = cmd
+    sync.atomic_store(&smh.entity_ring.head, next_head)
+    return true
+}
+
+// Helper: Create a command with type and values
+make_command :: proc(cmd_type: u8, values: [4]f32 = {}, data_str: string = "") -> OdinCommand {
+    cmd: OdinCommand
+    cmd.type = cmd_type
+    cmd.values = values
+    
+    // Copy string data
+    data_len := min(len(data_str), COMMAND_DATA_SIZE)
+    for i in 0..<data_len {
+        cmd.data[i] = data_str[i]
+    }
+    cmd.data_length = u16(data_len)
+    
+    return cmd
+}
+
+// Process all pending input commands
+process_input_commands :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState) {
+    for has_input_command(smh) {
+        cmd, ok := pop_input_command(smh)
+        if !ok { break }
         
-        if tail == head { break }
-        
-        event := smh.events[tail % EVENT_QUEUE_SIZE]
-        
-        switch event.event_type {
-        case .StartGame:
-            debug_log("[EVENT] StartGame from Unreal\n")
-            reset_game(state)
-        case .EndGame:
-            debug_log("[EVENT] EndGame from Unreal\n")
-            state.game_state.is_active = false
-        case .PlayerInput:
-            // Can use Unreal input when not using keyboard
-        case .None:
+        switch cmd.type {
+        case ODIN_CMD_INPUT:
+            // Parse input name from Data field
+            input_name := string(cmd.data[:cmd.data_length])
+            
+            // Route input by name
+            switch input_name {
+            case "Move":
+                // Values: x, y, button
+                state.input_x = cmd.values[0]
+                state.input_y = cmd.values[1]
+                if g_config.debug_logging {
+                    debug_log("[CMD] INPUT Move: x=%.2f y=%.2f\n", cmd.values[0], cmd.values[1])
+                }
+            case "Look":
+                // Values: x, y (for camera/aim)
+                // Future: state.look_x = cmd.values[0], state.look_y = cmd.values[1]
+                if g_config.debug_logging {
+                    debug_log("[CMD] INPUT Look: x=%.2f y=%.2f\n", cmd.values[0], cmd.values[1])
+                }
+            case "Action":
+                // Values: button (0 or 1)
+                // Future: trigger action when button > 0
+                if g_config.debug_logging {
+                    debug_log("[CMD] INPUT Action: %.2f\n", cmd.values[0])
+                }
+            case:
+                // Unknown input name - log for debugging
+                if g_config.debug_logging {
+                    debug_log("[CMD] INPUT '%s': values=[%.2f, %.2f, %.2f, %.2f]\n", 
+                        input_name, cmd.values[0], cmd.values[1], cmd.values[2], cmd.values[3])
+                }
+            }
+            
+        case ODIN_CMD_GAME:
+            // Values[0]: 1=start, -1=end, 0=state change
+            if cmd.values[0] > 0 {
+                debug_log("[CMD] GAME_START\n")
+                reset_game(state)
+            } else if cmd.values[0] < 0 {
+                debug_log("[CMD] GAME_END\n")
+                state.game_state.is_active = false
+            } else {
+                // State change (pause, resume, etc.)
+                data_str := string(cmd.data[:cmd.data_length])
+                debug_log("[CMD] GAME_STATE: %s\n", data_str)
+            }
+            
+        case:
+            debug_log("[CMD] Unknown command type: 0x%02X\n", cmd.type)
         }
-        
-        sync.atomic_store(&smh.event_tail, (tail + 1) % EVENT_QUEUE_SIZE)
     }
 }
 
@@ -700,7 +811,7 @@ main :: proc() {
         fmt.println("[HEADLESS] Waiting for events from Unreal client...")
         
         for {
-            process_events(smh.ptr, &local_state)
+            process_input_commands(smh.ptr, &local_state)
             update_game(&local_state, 1.0 / 60.0)
             write_frame(smh.ptr, &local_state, &builder)
             time.sleep(time.Millisecond * 16)
@@ -718,7 +829,7 @@ main :: proc() {
         for !rl.WindowShouldClose() {
             if !poll_keyboard_input(&local_state) { break }
             
-            process_events(smh.ptr, &local_state)
+            process_input_commands(smh.ptr, &local_state)
             update_game(&local_state, 1.0 / 60.0)
             write_frame(smh.ptr, &local_state, &builder)
             draw_game(&local_state)

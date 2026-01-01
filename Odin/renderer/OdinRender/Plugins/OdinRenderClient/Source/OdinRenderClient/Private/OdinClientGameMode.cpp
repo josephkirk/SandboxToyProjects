@@ -34,13 +34,18 @@ void AOdinClientGameMode::BeginPlay() {
 }
 
 void AOdinClientGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason) {
+    // Send end game command to Odin
+    if (OdinSubsystem && OdinSubsystem->IsConnected()) {
+        OdinSubsystem->PushGameCommand(-1.0f, NAME_None); // -1 = End
+    }
+    
     // Clean up player
     if (PlayerActor) {
         PlayerActor->Destroy();
         PlayerActor = nullptr;
     }
     
-    // Player state is managed by GameState, no need to destroy
+    // Player state is managed by GameState
     OdinPlayerState = nullptr;
     
     if (OdinSubsystem) {
@@ -97,6 +102,11 @@ AActor* AOdinClientGameMode::SpawnPlayerActor(TSubclassOf<AActor> PlayerClass, F
     return PlayerActor;
 }
 
-void AOdinClientGameMode::HandleConnected() { OnOdinConnected(); }
+void AOdinClientGameMode::HandleConnected() {
+    // Send start game command to Odin
+    if (OdinSubsystem) {
+        OdinSubsystem->PushGameCommand(1.0f, NAME_None); // 1 = Start
+    }
+    OnOdinConnected();
+}
 void AOdinClientGameMode::HandleDisconnected() { OnOdinDisconnected(); }
-

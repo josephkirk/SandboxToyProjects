@@ -15,15 +15,15 @@ bool UVampireSurvivalSubsystem::ConnectToOdinDefault() {
 }
 
 void UVampireSurvivalSubsystem::SendStartGame() {
-    if (OdinClient) OdinClient->SendEvent(1, 0, 0); // 1 = StartGame
+    if (OdinClient) OdinClient->PushGameCommand(1.0f, NAME_None); // 1 = Start
 }
 
 void UVampireSurvivalSubsystem::SendEndGame() {
-    if (OdinClient) OdinClient->SendEvent(2, 0, 0); // 2 = EndGame
+    if (OdinClient) OdinClient->PushGameCommand(-1.0f, NAME_None); // -1 = End
 }
 
 void UVampireSurvivalSubsystem::SendPlayerInput(float MoveX, float MoveY) {
-    if (OdinClient) OdinClient->SendEvent(3, MoveX, MoveY); // 3 = PlayerInput
+    if (OdinClient) OdinClient->PushInputCommand(FName("Move"), MoveX, MoveY, 0.f);
 }
 
 UOdinGameState* UVampireSurvivalSubsystem::UpdateAndGetState() {
