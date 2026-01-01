@@ -18,5 +18,13 @@ A high-performance gravitational N-body simulation using the **Barnes-Hut** algo
 
 ![nbody](docs/nbody.gif)
 
+### [Vulkan Compute Learning](./VulkanCompute)
+A simple sand simulation project implemented in **Zig** and built using the **Vulkan** API with compute shader.
+All Vulkan code is verbally commented for learning purposes.
+
+![sand](docs/sandfall.gif)
+
+
+
 ## Author
 Nguyen Phi Hung
