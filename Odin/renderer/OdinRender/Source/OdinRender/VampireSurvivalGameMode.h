@@ -8,12 +8,11 @@
 #include "GameFramework/GameModeBase.h"
 #include "Generated/GameStateWrappers.h"
 #include "VampireSurvivalGameMode.generated.h"
-#include "VampireSurvivalTypes.h"
 
 class UVampireSurvivalSubsystem;
 
 UCLASS()
-class ODINRENDERCLIENT_API AVampireSurvivalGameMode : public AGameModeBase {
+class ODINRENDER_API AVampireSurvivalGameMode : public AGameModeBase {
   GENERATED_BODY()
 
 public:
@@ -23,7 +22,7 @@ public:
   virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
   virtual void Tick(float DeltaTime) override;
 
-  // Blueprint Events (using simple types instead of packed struct)
+  // Blueprint Events
   UFUNCTION(BlueprintImplementableEvent, Category = "VampireSurvival")
   void OnGameStateReceived(FVector2D PlayerPosition, int32 PlayerHealth,
                            int32 Score, int32 EnemyCount, bool bIsActive);
@@ -34,7 +33,7 @@ public:
   UFUNCTION(BlueprintImplementableEvent, Category = "VampireSurvival")
   void OnOdinDisconnected();
 
-  // Input handling - call from Enhanced Input
+  // Input handling
   UFUNCTION(BlueprintCallable, Category = "VampireSurvival")
   void HandleMoveInput(FVector2D MoveInput);
 
@@ -44,9 +43,9 @@ public:
   UFUNCTION(BlueprintCallable, Category = "VampireSurvival")
   void EndOdinGame();
 
-  // Get raw game state (C++ only)
+  // Get raw game state
   UFUNCTION(BlueprintCallable, Category = "VampireSurvival")
-  UGameStateWrapper *GetCachedGameState() const { return CachedGameState; }
+  const FGameStateWrapper& GetCachedGameState() const { return CachedGameState; }
 
 protected:
   UPROPERTY()
@@ -59,13 +58,12 @@ protected:
 
   float StatePollingTimer = 0.0f;
 
-  UPROPERTY()
-  UGameStateWrapper *CachedGameState = nullptr;
+  UPROPERTY(BlueprintReadOnly, Category = "VampireSurvival")
+  FGameStateWrapper CachedGameState;
 
 private:
   UFUNCTION()
-  void OnConnectedCallback();
-
-  UFUNCTION()
-  void OnDisconnectedCallback();
+  void OnConnectedCallback(); // Bound to Subsystem delegate
+  
+  // Note: Subsystem now handles delegating connection events
 };

@@ -10,7 +10,7 @@ public class OdinRenderClient : ModuleRules
 		
 		PublicIncludePaths.AddRange(
 			new string[] {
-				// ... add public include paths required here ...
+				ModuleDirectory, // Allows referencing files relative to Source/OdinRenderClient, e.g. "flatbuffers/flatbuffers.h"
 			}
 			);
 				

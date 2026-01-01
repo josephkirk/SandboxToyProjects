@@ -5,10 +5,25 @@ from pathlib import Path
 
 # Configuration
 SCRIPT_DIR = Path(__file__).parent.resolve()
+# g:\Projects\SandboxDev\thirdparties\Windows.flatc.binary\flatc.exe
+FLATC_PATH = SCRIPT_DIR / r"..\..\..\thirdparties\Windows.flatc.binary\flatc.exe"
+# ../.. from tools is SandboxDev? 
+# Tools in Odin/tools
+# .. -> Odin
+# .. -> SandboxDev
+# So ../../ is SandboxDev.
+# SCRIPT_DIR is g:\Projects\SandboxDev\Odin\tools
+# FLATC is g:\Projects\SandboxDev\thirdparties\...
+# So ..\..\thirdparties is correct?
+# User said: g:\Projects\SandboxDev\thirdparties
+# SCRIPT_DIR: g:\Projects\SandboxDev\Odin\tools
+# REL: ..\..\thirdparties
+# Let's just trust ..\..\thirdparties.
 FLATC_PATH = SCRIPT_DIR / r"..\..\thirdparties\Windows.flatc.binary\flatc.exe"
 SCHEMA_DIR = SCRIPT_DIR / r"..\schemas"
-UE_PUBLIC_DIR = SCRIPT_DIR / r"..\renderer\OdinRender\Plugins\OdinRenderClient\Source\OdinRenderClient\Public\Generated"
-UE_PRIVATE_DIR = SCRIPT_DIR / r"..\renderer\OdinRender\Plugins\OdinRenderClient\Source\OdinRenderClient\Private\Generated"
+# Target Project Source Generated Directory
+# Game Module (Specific)
+UE_GAME_DIR = SCRIPT_DIR / r"..\renderer\OdinRender\Source\OdinRender\Generated"
 ODIN_OUT_DIR = SCRIPT_DIR / r"..\game\generated"
 
 def run_flatc(schema_file):
@@ -19,7 +34,7 @@ def run_flatc(schema_file):
         "--cpp-std", "c++17",
         "--gen-object-api",
         "--filename-suffix", "_flatbuffer",
-        "-o", str(UE_PUBLIC_DIR),
+        "-o", str(UE_GAME_DIR),
         str(schema_file)
     ]
     print(f"Running flatc (C++): {' '.join(cmd)}")
@@ -65,57 +80,69 @@ def gen_ue_wrappers(parser, table_list):
 #include "GameStateWrappers.generated.h"
 
 """
-    cpp = """#include "Generated/GameStateWrappers.h"
+    cpp = """#include "GameStateWrappers.h"
 """
 
     for name, fields in parser.tables:
-        wrapper_name = f"U{name}Wrapper"
+        wrapper_name = f"F{name}Wrapper" # UStruct convention F prefix
         
-        header += f"""UCLASS(BlueprintType)
-class {wrapper_name} : public UObject
+        header += f"""USTRUCT(BlueprintType)
+struct {wrapper_name}
 {{
     GENERATED_BODY()
-public:
-    const VS::Schema::{name}* Buffer = nullptr;
-    void Init(const VS::Schema::{name}* InBuffer) {{ Buffer = InBuffer; }}
+
 """
+        # Properties
         for fname, ftype in fields:
             ue_type = "int32"
-            ue_ret = f"Buffer->{fname}()"
-            
-            # Type mapping
             if ftype == "int": ue_type = "int32"
             elif ftype == "float": ue_type = "float"
             elif ftype == "bool": ue_type = "bool"
-            elif "Vec2" in ftype: # Struct needs special handling
-                ue_type = "FVector2D"
-                ue_ret = f"FVector2D(Buffer->{fname}()->x(), Buffer->{fname}()->y())"
-            elif ftype == "Player" or ftype == "Enemy": # Tables -> Wrappers
-                ue_type = f"U{ftype}Wrapper*"
-                # For tables, we need to Construct/Init a new wrapper. 
-                # Optimization: Cache? For now, create new (GC handles it).
-                ue_ret = f"NewObject<U{ftype}Wrapper>(const_cast<UObject*>(reinterpret_cast<const UObject*>(this)));"
-                ue_ret += f" result->Init(Buffer->{fname}()); return result" 
-                # Wait, this is getting complex for a one-liner return. We need body expansion.
-            elif "[" in ftype: continue 
+            elif "Vec2" in ftype: ue_type = "FVector2D"
+            elif ftype == "Player" or ftype == "Enemy": ue_type = f"F{ftype}Wrapper"
+            elif "GameEventType" in ftype: ue_type = "int32" # Enum as int for simplicity or specific enum
             
-            header += f"""    UFUNCTION(BlueprintPure, Category = "Odin|{name}")
-    {ue_type} Get{fname.title()}() const {{
-        if (!Buffer) return {{}};
-"""
-            if ftype == "Player" or ftype == "Enemy":
-                header += f"""        U{ftype}Wrapper* Wrapper = NewObject<U{ftype}Wrapper>(const_cast<UObject*>(reinterpret_cast<const UObject*>(this)));
-        Wrapper->Init(Buffer->{fname}());
-        return Wrapper;
-    }}
-"""
-            else:
-                header += f"        return {ue_ret};\n    }}\n"
+            if "[" in ftype: # Array
+                inner_type = ftype.replace("[","").replace("]","")
+                if inner_type == "Enemy": ue_type = f"TArray<F{inner_type}Wrapper>"
+                else: ue_type = f"TArray<int32>" # Simplification, expand if needed
+
+            header += f"    UPROPERTY(BlueprintReadWrite, Category = \"Odin|{name}\")\n"
+            header += f"    {ue_type} {fname.title()};\n\n"
+
+        # UpdateFrom Method
+        header += f"    void UpdateFrom(const VS::Schema::{name}* InBuffer);\n"
         header += "};\n\n"
 
-    with open(f"{UE_PUBLIC_DIR}/GameStateWrappers.h", "w") as f: f.write(header)
-    with open(f"{UE_PRIVATE_DIR}/GameStateWrappers.cpp", "w") as f: f.write(cpp)
-    print("Generated Unreal Wrappers.")
+        # CPP Implementation of UpdateFrom
+        cpp += f"void {wrapper_name}::UpdateFrom(const VS::Schema::{name}* InBuffer)\n{{\n"
+        cpp += "    if (!InBuffer) return;\n"
+        
+        for fname, ftype in fields:
+            # Scalar mapping
+            if ftype in ["int", "float", "bool"]:
+                cpp += f"    {fname.title()} = InBuffer->{fname}();\n"
+            elif "Vec2" in ftype:
+                cpp += f"    if (InBuffer->{fname}()) {fname.title()} = FVector2D(InBuffer->{fname}()->x(), InBuffer->{fname}()->y());\n"
+            elif ftype in ["Player", "Enemy"]: # Nested table
+                 cpp += f"    if (InBuffer->{fname}()) {fname.title()}.UpdateFrom(InBuffer->{fname}());\n"
+            elif "[" in ftype: # Array of tables (Enemies)
+                inner_type = ftype.replace("[","").replace("]","")
+                if inner_type == "Enemy":
+                    cpp += f"""    if (InBuffer->{fname}()) {{
+        {fname.title()}.SetNum(InBuffer->{fname}()->size());
+        for (uint32 i = 0; i < InBuffer->{fname}()->size(); ++i) {{
+            if (InBuffer->{fname}()->Get(i)) {{
+                {fname.title()}[i].UpdateFrom(InBuffer->{fname}()->Get(i));
+            }}
+        }}
+    }}
+"""
+        cpp += "}\n\n"
+
+    with open(f"{UE_GAME_DIR}/GameStateWrappers.h", "w") as f: f.write(header)
+    with open(f"{UE_GAME_DIR}/GameStateWrappers.cpp", "w") as f: f.write(cpp)
+    print("Generated Unreal UStruct Wrappers.")
 
 def gen_odin_code(parser):
     code = """package generated
@@ -187,7 +214,7 @@ def main():
     if not schema.exists(): return print(f"No schema found at {schema}")
     
     # Ensure dirs
-    for d in [UE_PUBLIC_DIR, UE_PRIVATE_DIR, ODIN_OUT_DIR]:
+    for d in [UE_GAME_DIR, ODIN_OUT_DIR]:
         if not os.path.exists(d): os.makedirs(d)
 
     run_flatc(schema)
