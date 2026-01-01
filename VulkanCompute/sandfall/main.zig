@@ -92,23 +92,30 @@ pub fn main() !void {
     defer ctx.destroyPipeline(comp_pipe);
 
     // =========================================================================
-    // 4. GRAPHICS PIPELINE SETUP (Renders simulation to screen)
+    // 4. GRAPHICS PIPELINE SETUP (Two display modes)
     // =========================================================================
-    // Using GLSL shaders here to demonstrate the system supports both HLSL and GLSL!
-    // The CRT effect gives a retro green terminal look.
+    // Press 1: Simple colored shader (HLSL)
+    // Press 2: CRT terminal text effect (GLSL)
     const gfx_dsl = try ctx.createDescriptorSetLayout(&.{
         .{ .binding = 0, .descriptorType = vk_win.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = vk_win.VK_SHADER_STAGE_FRAGMENT_BIT, .pImmutableSamplers = null },
     });
     defer ctx.destroyDescriptorSetLayout(gfx_dsl);
 
-    // Compile GLSL shaders (note the .vert.glsl and .frag.glsl extensions)
-    const vert_spirv = try vk_comp.ShaderCompiler.compile(allocator, "sand_crt.vert.glsl", "main", "");
-    defer allocator.free(vert_spirv);
-    const frag_spirv = try vk_comp.ShaderCompiler.compile(allocator, "sand_crt.frag.glsl", "main", "");
-    defer allocator.free(frag_spirv);
+    // MODE 1: Simple colored display (HLSL)
+    const simple_vert_spirv = try vk_comp.ShaderCompiler.compile(allocator, "sand_display.hlsl", "VSMain", "vs_6_0");
+    defer allocator.free(simple_vert_spirv);
+    const simple_frag_spirv = try vk_comp.ShaderCompiler.compile(allocator, "sand_display.hlsl", "PSMain", "ps_6_0");
+    defer allocator.free(simple_frag_spirv);
+    const gfx_pipe_simple = try ctx.createSimpleGraphicsPipeline(simple_vert_spirv, simple_frag_spirv, "VSMain", "PSMain", &.{gfx_dsl});
+    defer gfx_pipe_simple.destroy(ctx.device);
 
-    const gfx_pipe = try ctx.createSimpleGraphicsPipeline(vert_spirv, frag_spirv, "main", "main", &.{gfx_dsl});
-    defer gfx_pipe.destroy(ctx.device);
+    // MODE 2: CRT terminal text effect (GLSL)
+    const crt_vert_spirv = try vk_comp.ShaderCompiler.compile(allocator, "sand_crt.vert.glsl", "main", "");
+    defer allocator.free(crt_vert_spirv);
+    const crt_frag_spirv = try vk_comp.ShaderCompiler.compile(allocator, "sand_crt.frag.glsl", "main", "");
+    defer allocator.free(crt_frag_spirv);
+    const gfx_pipe_crt = try ctx.createSimpleGraphicsPipeline(crt_vert_spirv, crt_frag_spirv, "main", "main", &.{gfx_dsl});
+    defer gfx_pipe_crt.destroy(ctx.device);
 
     // =========================================================================
     // 5. TAA RESOLVE COMPUTE PIPELINE
@@ -216,7 +223,12 @@ pub fn main() !void {
 
     var frame_count: u32 = 0;
     const start_time = std.time.milliTimestamp();
-    std.debug.print("Starting simulation loop with TAA + CRT effects...\n", .{});
+
+    // Display mode: 1 = simple colored, 2 = CRT terminal text
+    var display_mode: u8 = 2; // Start with CRT mode
+    // TAA toggle: true = enabled, false = disabled
+    var taa_enabled: bool = true;
+    std.debug.print("Controls: 1=Simple, 2=CRT, 3=Toggle TAA\n", .{});
 
     // =========================================================================
     // MAIN SIMULATION LOOP
@@ -277,85 +289,81 @@ pub fn main() !void {
         // STAGE 2: GRAPHICS (Render simulation to swapchain)
         // =====================================================================
         // Draw a fullscreen triangle. The fragment shader samples the simulation
-        // texture and applies colors (yellow for sand, gray for walls, etc.)
+        // texture and applies visualization (simple or CRT text based on mode).
+        //
+        // Toggle with number keys:
+        //   1 = Simple colored shader (HLSL)
+        //   2 = CRT terminal text (GLSL)
+        //
+        if (ctx.key_pressed == 1) {
+            display_mode = 1;
+            std.debug.print("Display mode: Simple\n", .{});
+        } else if (ctx.key_pressed == 2) {
+            display_mode = 2;
+            std.debug.print("Display mode: CRT Terminal\n", .{});
+        } else if (ctx.key_pressed == 3) {
+            taa_enabled = !taa_enabled;
+            if (taa_enabled) {
+                std.debug.print("TAA: ON\n", .{});
+            } else {
+                std.debug.print("TAA: OFF\n", .{});
+            }
+        }
+
+        const active_pipe = if (display_mode == 1) gfx_pipe_simple else gfx_pipe_crt;
+
         ctx.beginRenderPass(cmdbuf);
         {
             ctx.updateDescriptorSetImage(setDisplay, 0, outImg.view, vk_win.VK_IMAGE_LAYOUT_GENERAL, vk_win.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-            ctx.bindGraphicsPipeline(cmdbuf, gfx_pipe.pipeline);
-            ctx.bindDescriptorSet(cmdbuf, vk_win.VK_PIPELINE_BIND_POINT_GRAPHICS, gfx_pipe.layout, setDisplay);
+            ctx.bindGraphicsPipeline(cmdbuf, active_pipe.pipeline);
+            ctx.bindDescriptorSet(cmdbuf, vk_win.VK_PIPELINE_BIND_POINT_GRAPHICS, active_pipe.layout, setDisplay);
             ctx.draw(cmdbuf, 3, 1, 0, 0);
         }
         ctx.endRenderPass(cmdbuf);
 
         // =====================================================================
-        // STAGE 3: COPY SWAPCHAIN → taaCurrentFrame
+        // STAGE 3-5: TAA AND CRT POST-PROCESSING (conditional)
         // =====================================================================
-        // The render pass wrote to the swapchain. We need that data in
-        // taaCurrentFrame for TAA to process. This blit copies the image.
-        ctx.transitionForBlitSrc(cmdbuf, ctx.getCurrentSwapchainImage(), vk_win.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-        ctx.transitionForBlitDst(cmdbuf, taaCurrentFrame.handle, vk_win.VK_IMAGE_LAYOUT_GENERAL);
+        if (taa_enabled) {
+            // --- STAGE 3: COPY SWAPCHAIN -> taaCurrentFrame ---
+            ctx.transitionForBlitSrc(cmdbuf, ctx.getCurrentSwapchainImage(), vk_win.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+            ctx.transitionForBlitDst(cmdbuf, taaCurrentFrame.handle, vk_win.VK_IMAGE_LAYOUT_GENERAL);
+            ctx.blitImage(cmdbuf, ctx.getCurrentSwapchainImage(), ctx.width, ctx.height, taaCurrentFrame.handle, ctx.width, ctx.height);
+            ctx.transitionFromBlitDstToGeneral(cmdbuf, taaCurrentFrame.handle);
 
-        ctx.blitImage(cmdbuf, ctx.getCurrentSwapchainImage(), ctx.width, ctx.height, taaCurrentFrame.handle, ctx.width, ctx.height);
+            // --- STAGE 4: TAA RESOLVE ---
+            ctx.bindComputePipeline(cmdbuf, taa_pipe);
+            ctx.bindDescriptorSet(cmdbuf, vk_win.VK_PIPELINE_BIND_POINT_COMPUTE, taa_pipeline_layout, setTAA);
+            ctx.dispatchCompute(cmdbuf, ctx.width / 16, ctx.height / 16, 1);
 
-        // Transition taaCurrentFrame back to GENERAL for TAA compute
-        ctx.transitionFromBlitDstToGeneral(cmdbuf, taaCurrentFrame.handle);
+            // --- STAGE 5: CRT POST-PROCESS ---
+            ctx.memoryBarrier(cmdbuf, vk_win.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk_win.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk_win.VK_ACCESS_SHADER_WRITE_BIT, vk_win.VK_ACCESS_SHADER_READ_BIT);
 
-        // =====================================================================
-        // STAGE 4: TAA RESOLVE (Compute)
-        // =====================================================================
-        // This is where the magic happens. For each pixel:
-        //   1. Sample 3x3 neighborhood of current frame → get min/max colors
-        //   2. Clamp history to this range (prevents ghosting from old data)
-        //   3. Blend: output = lerp(history, current, 0.15)
-        //   4. Write output AND update history for next frame
-        //
-        // The 15% blend factor means:
-        //   - 85% of the color comes from accumulated history (smooth)
-        //   - 15% comes from this frame (responsive)
-        //
-        // Over time, this creates a weighted average where recent frames
-        // contribute more than older ones (exponential decay).
-        ctx.bindComputePipeline(cmdbuf, taa_pipe);
-        ctx.bindDescriptorSet(cmdbuf, vk_win.VK_PIPELINE_BIND_POINT_COMPUTE, taa_pipeline_layout, setTAA);
-        ctx.dispatchCompute(cmdbuf, ctx.width / 16, ctx.height / 16, 1);
+            const current_time = std.time.milliTimestamp();
+            const elapsed_seconds: f32 = @as(f32, @floatFromInt(current_time - start_time)) / 1000.0;
 
-        // =====================================================================
-        // STAGE 5: CRT POST-PROCESS (Compute - HLSL)
-        // =====================================================================
-        // Applies animated CRT effects: scrolling scanlines, flicker, chromatic
-        // aberration. This is the FINAL compute pass before display.
-        //
-        // Pipeline so far: Compute(HLSL) → Fragment(GLSL) → TAA(HLSL) → CRT(HLSL)
-        //
-        ctx.memoryBarrier(cmdbuf, vk_win.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk_win.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk_win.VK_ACCESS_SHADER_WRITE_BIT, vk_win.VK_ACCESS_SHADER_READ_BIT);
+            const crt_params = CRTParams{
+                .time = elapsed_seconds,
+                .flickerSpeed = 15.0,
+                .scanSpeed = 2.0,
+                .padding = 0.0,
+            };
 
-        const current_time = std.time.milliTimestamp();
-        const elapsed_seconds: f32 = @as(f32, @floatFromInt(current_time - start_time)) / 1000.0;
+            ctx.bindComputePipeline(cmdbuf, crt_pipe);
+            ctx.bindDescriptorSet(cmdbuf, vk_win.VK_PIPELINE_BIND_POINT_COMPUTE, crt_pipeline_layout, setCRT);
+            ctx.pushConstants(cmdbuf, crt_pipeline_layout, vk_win.VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(CRTParams), &crt_params);
+            ctx.dispatchCompute(cmdbuf, ctx.width / 16, ctx.height / 16, 1);
 
-        const crt_params = CRTParams{
-            .time = elapsed_seconds,
-            .flickerSpeed = 15.0,
-            .scanSpeed = 2.0,
-            .padding = 0.0,
-        };
-
-        ctx.bindComputePipeline(cmdbuf, crt_pipe);
-        ctx.bindDescriptorSet(cmdbuf, vk_win.VK_PIPELINE_BIND_POINT_COMPUTE, crt_pipeline_layout, setCRT);
-        ctx.pushConstants(cmdbuf, crt_pipeline_layout, vk_win.VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(CRTParams), &crt_params);
-        ctx.dispatchCompute(cmdbuf, ctx.width / 16, ctx.height / 16, 1);
-
-        // =====================================================================
-        // STAGE 6: BLIT CRT OUTPUT → SWAPCHAIN
-        // =====================================================================
-        // Copy the final CRT-processed result to the swapchain for display.
-        ctx.transitionForBlitSrc(cmdbuf, crtOutput.handle, vk_win.VK_IMAGE_LAYOUT_GENERAL);
-        ctx.transitionForBlitDst(cmdbuf, ctx.getCurrentSwapchainImage(), vk_win.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-
-        ctx.blitImage(cmdbuf, crtOutput.handle, ctx.width, ctx.height, ctx.getCurrentSwapchainImage(), ctx.width, ctx.height);
-
-        // Prepare for present and next frame
-        ctx.transitionForPresent(cmdbuf, ctx.getCurrentSwapchainImage());
-        ctx.transitionFromBlitSrcToGeneral(cmdbuf, crtOutput.handle);
+            // --- STAGE 6: BLIT CRT OUTPUT -> SWAPCHAIN ---
+            ctx.transitionForBlitSrc(cmdbuf, crtOutput.handle, vk_win.VK_IMAGE_LAYOUT_GENERAL);
+            ctx.transitionForBlitDst(cmdbuf, ctx.getCurrentSwapchainImage(), vk_win.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            ctx.blitImage(cmdbuf, crtOutput.handle, ctx.width, ctx.height, ctx.getCurrentSwapchainImage(), ctx.width, ctx.height);
+            ctx.transitionForPresent(cmdbuf, ctx.getCurrentSwapchainImage());
+            ctx.transitionFromBlitSrcToGeneral(cmdbuf, crtOutput.handle);
+        } else {
+            // TAA disabled - just present the swapchain directly
+            ctx.transitionForPresent(cmdbuf, ctx.getCurrentSwapchainImage());
+        }
 
         try ctx.endFrame();
         frame_count += 1;

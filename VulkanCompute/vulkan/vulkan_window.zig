@@ -85,6 +85,9 @@ pub const WindowContext = struct {
     mouse_left: bool = false,
     mouse_right: bool = false,
 
+    // Keyboard State - tracks which key was pressed this frame (0 = none)
+    key_pressed: u8 = 0,
+
     /// Initializes a Windows window and sets up Vulkan Graphics/Compute context.
     pub fn init(allocator: std.mem.Allocator, width: u32, height: u32, title: [*:0]const u8) !WindowContext {
         // 1. Create Win32 Window
@@ -577,6 +580,9 @@ pub const WindowContext = struct {
     }
 
     pub fn update(self: *WindowContext) bool {
+        // Reset key pressed state each frame
+        self.key_pressed = 0;
+
         var msg: MSG = undefined;
         while (PeekMessageW(&msg, null, 0, 0, PM_REMOVE) != 0) {
             if (msg.message == WM_QUIT) {
@@ -593,6 +599,14 @@ pub const WindowContext = struct {
                 WM_LBUTTONUP => self.mouse_left = false,
                 WM_RBUTTONDOWN => self.mouse_right = true,
                 WM_RBUTTONUP => self.mouse_right = false,
+                WM_KEYDOWN => {
+                    // wParam contains the virtual key code
+                    const vk = @as(u32, @truncate(msg.wParam));
+                    // Check for number keys 1-9 (0x31-0x39) and 0 (0x30)
+                    if (vk >= 0x30 and vk <= 0x39) {
+                        self.key_pressed = @as(u8, @truncate(vk - 0x30)); // 0-9
+                    }
+                },
                 else => {},
             }
 
@@ -1535,6 +1549,7 @@ pub const WM_LBUTTONDOWN = 0x0201;
 pub const WM_LBUTTONUP = 0x0202;
 pub const WM_RBUTTONDOWN = 0x0204;
 pub const WM_RBUTTONUP = 0x0205;
+pub const WM_KEYDOWN = 0x0100;
 
 fn wndProc(hWnd: os.HWND, msg: os.UINT, wParam: os.WPARAM, lParam: os.LPARAM) callconv(WINAPI) os.LRESULT {
     switch (msg) {
