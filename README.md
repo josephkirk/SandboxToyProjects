@@ -12,7 +12,7 @@ This project also demonstrates using **Zig** to seamlessly interop with **C** (R
 
 ### [N-Body Simulation](./NBody)
 A high-performance gravitational N-body simulation using the **Barnes-Hut** algorithm. (main simulation code was taken from https://github.com/DeadlockCode/barnes-hut , credit to the author)
-- **Simulation**: Written in **Rust**, parallelized with **Rayon** for high-throughput physics.
+- **Simulation**: Written in **Rust**, parallelized with my job system **RustFiber** ([https://github.com/josephkirk/RustFiber](https://github.com/josephkirk/RustFiber)) for high-throughput physics. A pure Zig Simulation can be toggle for comparision.
 - **Visualization**: Built in **Zig** with **Raylib**, using low-level **rlgl** calls for rendering 100k+ bodies at 144+ FPS.
 - **Interop**: Zig-Rust FFI with a thin C-compatible API.
 
