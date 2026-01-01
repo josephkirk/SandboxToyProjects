@@ -86,17 +86,20 @@ pub fn main() !void {
     // =========================================================================
     // 4. GRAPHICS PIPELINE SETUP (Renders simulation to screen)
     // =========================================================================
+    // Using GLSL shaders here to demonstrate the system supports both HLSL and GLSL!
+    // The CRT effect gives a retro green terminal look.
     const gfx_dsl = try ctx.createDescriptorSetLayout(&.{
         .{ .binding = 0, .descriptorType = vk_win.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = vk_win.VK_SHADER_STAGE_FRAGMENT_BIT, .pImmutableSamplers = null },
     });
     defer ctx.destroyDescriptorSetLayout(gfx_dsl);
 
-    const vert_spirv = try vk_comp.ShaderCompiler.compile(allocator, "sand_display.hlsl", "VSMain", "vs_6_0");
+    // Compile GLSL shaders (note the .vert.glsl and .frag.glsl extensions)
+    const vert_spirv = try vk_comp.ShaderCompiler.compile(allocator, "sand_crt.vert.glsl", "main", "");
     defer allocator.free(vert_spirv);
-    const frag_spirv = try vk_comp.ShaderCompiler.compile(allocator, "sand_display.hlsl", "PSMain", "ps_6_0");
+    const frag_spirv = try vk_comp.ShaderCompiler.compile(allocator, "sand_crt.frag.glsl", "main", "");
     defer allocator.free(frag_spirv);
 
-    const gfx_pipe = try ctx.createSimpleGraphicsPipeline(vert_spirv, frag_spirv, "VSMain", "PSMain", &.{gfx_dsl});
+    const gfx_pipe = try ctx.createSimpleGraphicsPipeline(vert_spirv, frag_spirv, "main", "main", &.{gfx_dsl});
     defer gfx_pipe.destroy(ctx.device);
 
     // =========================================================================

@@ -496,10 +496,72 @@ pub const ShaderCompiler = struct {
             argc += 1;
             argv_buf[argc] = out_filename;
             argc += 1;
-        } else if (std.mem.eql(u8, extension, ".glsl") or std.mem.eql(u8, extension, ".comp")) {
-            // Use glslc for GLSL to SPIR-V
-            argv_buf[argc] = "glslc";
+        } else if (std.mem.eql(u8, extension, ".glsl") or std.mem.eql(u8, extension, ".comp") or
+            std.mem.eql(u8, extension, ".vert") or std.mem.eql(u8, extension, ".frag"))
+        {
+            // Use glslc (from Vulkan SDK) for GLSL to SPIR-V
+            // glslc auto-detects stage from extension OR we can specify it
+            argv_buf[argc] = "C:\\VulkanSDK\\1.4.335.0\\Bin\\glslc.exe";
             argc += 1;
+
+            // Detect shader stage from filename pattern (e.g., "foo.vert.glsl" or "foo.frag.glsl")
+            const basename = std.fs.path.stem(source_path); // removes .glsl
+            const stage_ext = std.fs.path.extension(basename); // gets .vert or .frag
+
+            if (stage_ext.len > 0) {
+                // Shader stage hint for glslc
+                argv_buf[argc] = "-fshader-stage=";
+                if (std.mem.eql(u8, stage_ext, ".vert")) {
+                    argv_buf[argc] = "-fshader-stage=vertex";
+                } else if (std.mem.eql(u8, stage_ext, ".frag")) {
+                    argv_buf[argc] = "-fshader-stage=fragment";
+                } else if (std.mem.eql(u8, stage_ext, ".comp")) {
+                    argv_buf[argc] = "-fshader-stage=compute";
+                } else {
+                    // Default to auto-detect
+                    argv_buf[argc] = source_path;
+                    argc += 1;
+                    argv_buf[argc] = "-o";
+                    argc += 1;
+                    argv_buf[argc] = out_filename;
+                    argc += 1;
+                    // Skip the rest
+                    const argv = argv_buf[0..argc];
+                    var child = std.process.Child.init(argv, allocator);
+                    child.stdin_behavior = .Ignore;
+                    child.stdout_behavior = .Inherit;
+                    child.stderr_behavior = .Inherit;
+                    const term = child.spawnAndWait() catch |err| {
+                        std.debug.print("Failed to spawn glslc: {}\n", .{err});
+                        return err;
+                    };
+                    switch (term) {
+                        .Exited => |code| {
+                            if (code != 0) {
+                                std.debug.print("glslc exited with code: {d}\n", .{code});
+                                return error.ShaderCompilationFailed;
+                            }
+                        },
+                        else => return error.ShaderCompilationCrashed,
+                    }
+                    // Read result
+                    const file = try std.fs.cwd().openFile(out_filename, .{});
+                    defer {
+                        file.close();
+                        std.fs.cwd().deleteFile(out_filename) catch {};
+                    }
+                    const fileSize = (try file.stat()).size;
+                    const buffer = try allocator.alloc(u8, fileSize);
+                    const bytes_read = try file.readAll(buffer);
+                    if (bytes_read != fileSize) {
+                        allocator.free(buffer);
+                        return error.ReadTruncated;
+                    }
+                    return buffer;
+                }
+                argc += 1;
+            }
+
             argv_buf[argc] = source_path;
             argc += 1;
             argv_buf[argc] = "-o";
