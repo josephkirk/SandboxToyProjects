@@ -67,12 +67,17 @@ void AVampireSurvivalGameMode::Tick(float DeltaTime) {
   if (StatePollingTimer >= StatePollingInterval) {
     StatePollingTimer = 0.0f;
 
-    if (Subsystem->ReadLatestGameState(CachedGameState)) {
-      FVector2D PlayerPos(CachedGameState.Player.Position.X,
-                          CachedGameState.Player.Position.Y);
-      OnGameStateReceived(PlayerPos, CachedGameState.Player.Health,
-                          CachedGameState.Score, CachedGameState.EnemyCount,
-                          CachedGameState.bIsActive);
+    UGameStateWrapper *NewState = Subsystem->GetLatestGameState();
+    if (NewState) {
+      CachedGameState = NewState;
+
+      UPlayerWrapper *Player = NewState->GetPlayer();
+      FVector2D PlayerPos =
+          Player ? Player->GetPosition() : FVector2D::ZeroVector;
+      int32 Health = Player ? Player->GetHealth() : 0;
+
+      OnGameStateReceived(PlayerPos, Health, NewState->GetScore(),
+                          NewState->GetEnemy_Count(), NewState->GetIs_Active());
     }
   }
 }

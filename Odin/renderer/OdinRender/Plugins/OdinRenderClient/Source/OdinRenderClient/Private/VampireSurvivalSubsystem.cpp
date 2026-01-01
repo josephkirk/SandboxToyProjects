@@ -125,9 +125,9 @@ void UVampireSurvivalSubsystem::SendPlayerInput(float MoveX, float MoveY) {
   SendEvent(Event);
 }
 
-bool UVampireSurvivalSubsystem::ReadLatestGameState(FVSGameState &OutState) {
+UGameStateWrapper *UVampireSurvivalSubsystem::GetLatestGameState() {
   if (SharedMemory == nullptr) {
-    return false;
+    return nullptr;
   }
 
   // Read latest frame index atomically
@@ -135,18 +135,39 @@ bool UVampireSurvivalSubsystem::ReadLatestGameState(FVSGameState &OutState) {
       FPlatformAtomics::AtomicRead(&SharedMemory->LatestFrameIndex);
 
   if (LatestIndex < 0 || LatestIndex >= RING_BUFFER_SIZE) {
-    return false;
+    return CurrentStateWrapper;
   }
 
-  const FVSFrameSlot &Slot = SharedMemory->Frames[LatestIndex];
+  const FVSSharedMemoryBlock::FrameSlot &Slot =
+      SharedMemory->Frames[LatestIndex];
 
   // Check if this is a new frame
-  if (static_cast<int32>(Slot.FrameNumber) == LastReadFrameNumber) {
-    return false; // No new data
+  if (static_cast<int32>(Slot.FrameNumber) <= LastReadFrameNumber) {
+    return CurrentStateWrapper; // Returns cached wrapper if no new frame
   }
 
-  OutState = Slot.State;
+  // Verify FlatBuffer
+  flatbuffers::Verifier Verifier(Slot.Data, Slot.DataSize);
+  if (!VS::Schema::VerifyGameStateBuffer(Verifier)) {
+    UE_LOG(LogTemp, Warning, TEXT("Invalid FlatBuffer in frame %llu"),
+           Slot.FrameNumber);
+    return CurrentStateWrapper;
+  }
+
+  // Create Wrapper
+  // We strictly need to keep this object alive or recreate it ?
+  // For Blueprint safety, we create a new wrapper. The old one will be GC'd
+  // eventually if no one holds it. Optimization: We could reuse valid wrappers
+  // if we copied data out, but since the wrapper holds a POINTER to Shared
+  // Memory, we must be careful. The Shared Memory slot persists, but gets
+  // overwritten eventually. Since we are wrapping the *latest* slot, it's safe
+  // for *this* frame.
+
+  CurrentStateWrapper = NewObject<UGameStateWrapper>(this);
+  const VS::Schema::GameState *Root = VS::Schema::GetGameState(Slot.Data);
+  CurrentStateWrapper->Init(Root);
+
   LastReadFrameNumber = static_cast<int32>(Slot.FrameNumber);
 
-  return true;
+  return CurrentStateWrapper;
 }

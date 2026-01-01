@@ -6,63 +6,66 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/GameModeBase.h"
-#include "VampireSurvivalTypes.h"
+#include "Generated/GameStateWrappers.h"
 #include "VampireSurvivalGameMode.generated.h"
+#include "VampireSurvivalTypes.h"
 
 class UVampireSurvivalSubsystem;
 
 UCLASS()
-class ODINRENDERCLIENT_API AVampireSurvivalGameMode : public AGameModeBase
-{
-    GENERATED_BODY()
+class ODINRENDERCLIENT_API AVampireSurvivalGameMode : public AGameModeBase {
+  GENERATED_BODY()
 
 public:
-    AVampireSurvivalGameMode();
+  AVampireSurvivalGameMode();
 
-    virtual void BeginPlay() override;
-    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-    virtual void Tick(float DeltaTime) override;
+  virtual void BeginPlay() override;
+  virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+  virtual void Tick(float DeltaTime) override;
 
-    // Blueprint Events (using simple types instead of packed struct)
-    UFUNCTION(BlueprintImplementableEvent, Category = "VampireSurvival")
-    void OnGameStateReceived(FVector2D PlayerPosition, int32 PlayerHealth, int32 Score, int32 EnemyCount, bool bIsActive);
+  // Blueprint Events (using simple types instead of packed struct)
+  UFUNCTION(BlueprintImplementableEvent, Category = "VampireSurvival")
+  void OnGameStateReceived(FVector2D PlayerPosition, int32 PlayerHealth,
+                           int32 Score, int32 EnemyCount, bool bIsActive);
 
-    UFUNCTION(BlueprintImplementableEvent, Category = "VampireSurvival")
-    void OnOdinConnected();
+  UFUNCTION(BlueprintImplementableEvent, Category = "VampireSurvival")
+  void OnOdinConnected();
 
-    UFUNCTION(BlueprintImplementableEvent, Category = "VampireSurvival")
-    void OnOdinDisconnected();
+  UFUNCTION(BlueprintImplementableEvent, Category = "VampireSurvival")
+  void OnOdinDisconnected();
 
-    // Input handling - call from Enhanced Input
-    UFUNCTION(BlueprintCallable, Category = "VampireSurvival")
-    void HandleMoveInput(FVector2D MoveInput);
+  // Input handling - call from Enhanced Input
+  UFUNCTION(BlueprintCallable, Category = "VampireSurvival")
+  void HandleMoveInput(FVector2D MoveInput);
 
-    UFUNCTION(BlueprintCallable, Category = "VampireSurvival")
-    void StartOdinGame();
+  UFUNCTION(BlueprintCallable, Category = "VampireSurvival")
+  void StartOdinGame();
 
-    UFUNCTION(BlueprintCallable, Category = "VampireSurvival")
-    void EndOdinGame();
+  UFUNCTION(BlueprintCallable, Category = "VampireSurvival")
+  void EndOdinGame();
 
-    // Get raw game state (C++ only)
-    const FVSGameState& GetLatestGameState() const { return CachedGameState; }
+  // Get raw game state (C++ only)
+  UFUNCTION(BlueprintCallable, Category = "VampireSurvival")
+  UGameStateWrapper *GetCachedGameState() const { return CachedGameState; }
 
 protected:
-    UPROPERTY()
-    UVampireSurvivalSubsystem* Subsystem;
+  UPROPERTY()
+  UVampireSurvivalSubsystem *Subsystem;
 
-    FVector2D CurrentMoveInput;
+  FVector2D CurrentMoveInput;
 
-    UPROPERTY(EditDefaultsOnly, Category = "VampireSurvival")
-    float StatePollingInterval = 0.016f;
+  UPROPERTY(EditDefaultsOnly, Category = "VampireSurvival")
+  float StatePollingInterval = 0.016f;
 
-    float StatePollingTimer = 0.0f;
+  float StatePollingTimer = 0.0f;
 
-    FVSGameState CachedGameState;
+  UPROPERTY()
+  UGameStateWrapper *CachedGameState = nullptr;
 
 private:
-    UFUNCTION()
-    void OnConnectedCallback();
+  UFUNCTION()
+  void OnConnectedCallback();
 
-    UFUNCTION()
-    void OnDisconnectedCallback();
+  UFUNCTION()
+  void OnDisconnectedCallback();
 };

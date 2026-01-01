@@ -1,0 +1,39 @@
+// GameState.fbs
+// FlatBuffers schema for Vampire Survival game state
+
+namespace VS.Schema;
+
+struct Vec2 {
+  x: float;
+  y: float;
+}
+
+table Player {
+  position: Vec2;
+  rotation: float;
+  slash_active: bool;
+  slash_angle: float;
+  health: int;
+}
+
+table Enemy {
+  position: Vec2;
+  is_alive: bool;
+}
+
+enum GameEventType : int {
+  None = 0,
+  StartGame = 1,
+  EndGame = 2,
+  PlayerInput = 3
+}
+
+table GameState {
+  player: Player;
+  enemies: [Enemy];
+  score: int;
+  enemy_count: int;
+  is_active: bool;
+}
+
+root_type GameState;

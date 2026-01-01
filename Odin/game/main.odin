@@ -5,9 +5,12 @@ import "core:time"
 import "core:math"
 import "core:math/rand"
 import "core:sync"
+import "core:mem"
 import "core:os"
 import "core:sys/windows"
 import rl "vendor:raylib"
+import fb "./flatbuffers"
+import gen "./generated"
 
 // ============================================================================
 // Shared Memory Data Structures (Matching C++ layout for Unreal)
@@ -46,12 +49,16 @@ GameState :: struct #packed {
     _padding: [3]u8,
 }
 
+MAX_FRAME_SIZE :: 16 * 1024
+
 FrameSlot :: struct #packed {
     frame_number: u64,
     timestamp: f64,
-    state: GameState,
+    data_size: u32,
+    data: [MAX_FRAME_SIZE]u8,
 }
 
+// Keep GameEventType and GameEvent as packed structs for now (Input)
 GameEventType :: enum i32 {
     None = 0,
     StartGame = 1,
@@ -560,15 +567,74 @@ process_events :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState) {
 // Frame Writing
 // ============================================================================
 
-write_frame :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState) {
+// ============================================================================
+// Frame Writing
+// ============================================================================
+
+write_frame :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState, builder: ^fb.Builder) {
     state.frame_number += 1
     
-    next_idx := (sync.atomic_load(&smh.latest_frame_index) + 1) % RING_BUFFER_SIZE
+    // Clear builder for new frame
+    fb.init_builder_reuse(builder) // Helper to reuse buffer? Or just make new one.
+    // My minimal builder `init_builder` makes new arrays. 
+    // Optimization: Reuse memory. 
+    // ensuring builder.bytes is clear.
+    builder.bytes = make([dynamic]byte, 0, 1024, context.temp_allocator)
+    if len(builder.bytes) > 0 { clear(&builder.bytes) } // Actually make capacity 0? No.
     
+    // 1. Prepare Data for Packing
+    // We need to map LocalGameState (Fixed) to Generated.GameState (Dynamic)
+    // Using temp allocator for the transient struct
+    
+    gen_state: gen.GameState
+    gen_state.score = state.game_state.score
+    gen_state.enemy_count = state.game_state.enemy_count
+    gen_state.is_active = state.game_state.is_active
+    
+    // Player
+    gen_state.player.position.x = state.game_state.player.position.x
+    gen_state.player.position.y = state.game_state.player.position.y
+    gen_state.player.rotation = state.game_state.player.rotation
+    gen_state.player.slash_active = state.game_state.player.slash_active
+    gen_state.player.slash_angle = state.game_state.player.slash_angle
+    gen_state.player.health = state.game_state.player.health
+    
+    // Enemies
+    // gen_state.enemies is [dynamic]gen.Enemy
+    // Create temp array
+    active_enemies := make([dynamic]gen.Enemy, 0, state.game_state.enemy_count, context.temp_allocator)
+    
+    for i in 0..<MAX_ENEMIES {
+        e := &state.game_state.enemies[i]
+        if e.is_alive {
+            ge: gen.Enemy
+            ge.position.x = e.position.x
+            ge.position.y = e.position.y
+            ge.is_alive = true
+            append(&active_enemies, ge)
+        }
+    }
+    gen_state.enemies = active_enemies
+    
+    // 2. Pack
+    root := gen.pack_GameState(builder, gen_state)
+    
+    // 3. Finish
+    buf := fb.finish(builder, root)
+    
+    // 4. Write to Shared Memory
+    next_idx := (sync.atomic_load(&smh.latest_frame_index) + 1) % RING_BUFFER_SIZE
     slot := &smh.frames[next_idx]
+    
     slot.frame_number = state.frame_number
     slot.timestamp = f64(time.now()._nsec) / 1_000_000_000.0
-    slot.state = state.game_state
+    slot.data_size = u32(len(buf))
+    
+    if len(buf) <= MAX_FRAME_SIZE {
+        mem.copy(&slot.data[0], &buf[0], len(buf))
+    } else {
+        fmt.println("ERROR: Frame too large for shared memory slot!")
+    }
     
     sync.atomic_store(&smh.latest_frame_index, next_idx)
 }
@@ -649,6 +715,9 @@ main :: proc() {
     local_state: LocalGameState
     init_game(&local_state)
     
+    // Initialize FlatBuffer Builder
+    builder := fb.init_builder()
+    
     if g_config.headless {
         // Headless mode - just write frames for Unreal
         fmt.println("[HEADLESS] Running in server mode. Press Ctrl+C to exit.")
@@ -657,7 +726,7 @@ main :: proc() {
         for {
             process_events(smh.ptr, &local_state)
             update_game(&local_state, 1.0 / 60.0)
-            write_frame(smh.ptr, &local_state)
+            write_frame(smh.ptr, &local_state, &builder)
             time.sleep(time.Millisecond * 16)
         }
     } else {
@@ -675,7 +744,7 @@ main :: proc() {
             
             process_events(smh.ptr, &local_state)
             update_game(&local_state, 1.0 / 60.0)
-            write_frame(smh.ptr, &local_state)
+            write_frame(smh.ptr, &local_state, &builder)
             draw_game(&local_state)
         }
     }

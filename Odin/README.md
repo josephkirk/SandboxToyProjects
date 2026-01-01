@@ -1,73 +1,107 @@
-A project demonstrate writing simple platform game , write to shared memory then use Unreal Engine 5 via Plugin contain gamemode that read shared memory to spawn actor to render the game.
+# Vampire Survival: Odin-Unreal Hybrid Game
 
-The Strategy: Circular Buffer of States
-Instead of two buffers, you create a ring of, say, 64 buffers in shared memory. Each buffer is tagged with a Frame Number (Sequence Number) and a Timestamp.
+A high-performance hybrid game architecture demonstrating zero-copy shared memory synchronization between an **Odin** game server and an **Unreal Engine 5** rendering client, using **FlatBuffers** for schema-evolvable serialization.
 
-Odin (Producer): Constantly writes new frames into the next available slot in the ring.
+## Overview
 
-Unreal (Consumer): Tracks which FrameNumber it last rendered. If it hitches for 50ms, it looks at the buffer, sees it is 3 frames behind, and can decide to either "skip to latest" or "playback" the missing frames to maintain smooth animation.
+The project splits the game responsibilities:
+-   **Odin (Producer)**: Runs the core game logic (simulation, physics, AI) and writes the game state to a shared memory ring buffer.
+-   **Unreal Engine 5 (Consumer)**: Reads the game state from shared memory and renders the scene using high-fidelity assets and lighting.
+-   **Shared Memory**: A lock-free(ish) circular buffer conveying FlatBuffer-encoded frames.
 
-2. Odin Implementation (The Recorder)
-In Odin, you manage the "Head" of the circular buffer.
+## Architecture
 
-Code snippet
+1.  **Schema Source of Truth**: `Odin/schemas/GameState.fbs` defines the data structure.
+2.  **Code Generation**: A build script (`Odin/tools/build_schemas.py`) generates:
+    -   **Odin**: `Odin/game/generated/game_state.odin` (Serialization logic).
+    -   **C++**: `OdinRenderClient/Source/OdinRenderClient/Public/Generated/` (Headers & UObject Wrappers).
+3.  **Communication**:
+    -   Odin writes a `FrameSlot` (seq number, timestamp, FlatBuffer bytes) to shared memory.
+    -   Unreal's `UVampireSurvivalSubsystem` reads the latest frame, verifies the FlatBuffer, and wraps it in a `UGameStateWrapper`.
+    -   Unreal Blueprints access the game state via the Wrapper's API.
 
-SharedState :: struct {
-    latest_index: i32,             // Atomic: The very latest frame produced
-    frames: [64]FrameSlot,         // The ring of data
-}
+## User Guide
 
+### Prerequisites
+-   **Odin Compiler**: Ensure `odin` is in your PATH or utilize the provided vendor version.
+-   **Unreal Engine 5**: Version 5.3 or later recommended.
+-   **Python 3**: For running build scripts.
+-   **FlatBuffers Compiler (`flatc`)**: Located in `thirdparties/Windows.flatc.binary/`.
+
+### 1. Running the Odin Server
+The Odin server drives the game state.
+
+**Visualizer Mode (Debug)**
+Runs with a Raylib window to visualize the state locally for debugging.
+```bash
+odin run Odin/game/main.odin -file
+```
+
+**Headless Mode (Production/Unreal)**
+Runs without a window, optimized for serving the Unreal client.
+```bash
+odin run Odin/game/main.odin -file -- -headless
+```
+*Note: The server must be running BEFORE the Unreal client connects.*
+
+### 2. Running the Unreal Client
+1.  Open `Odin/renderer/OdinRender/OdinRender.uproject` in Unreal Engine 5.
+2.  Press **Play** in the Editor.
+3.  The GameMode will automatically connect to the shared memory and start replicating the Odin state.
+
+## Developer Guide
+
+### Project Structure
+```
+Odin/
+├── game/
+│   ├── main.odin           # Game loop & Shared Memory writer
+│   ├── flatbuffers/        # Custom Odin FlatBuffer builder
+│   └── generated/          # Generated Odin packing code
+├── renderer/
+│   └── OdinRender/         # Unreal Engine 5 Project
+│       └── Plugins/OdinRenderClient/
+│           ├── Public/Generated/   # Generated C++ Wrappers
+│           └── Private/            # Subsystem implementation
+├── schemas/
+│   └── GameState.fbs       # FlatBuffers Schema (Source of Truth)
+└── tools/
+    └── build_schemas.py    # Code generation orchestration script
+```
+
+### Workflow: Modifying Game State
+1.  **Edit Schema**: Modify `Odin/schemas/GameState.fbs`.
+    ```flatbuffers
+    table Player {
+        position: Vec2;
+        new_field: int; // <--- Added field
+    }
+    ```
+2.  **Run Build Script**:
+    ```bash
+    uv run Odin/tools/build_schemas.py
+    ```
+    This updates C++ headers, Unreal Wrappers, and Odin bindings.
+3.  **Update Odin Logic**:
+    -   Update `Odin/game/main.odin`'s `write_frame` procedure to populate the new field in the builder.
+4.  **Update Unreal Logic**:
+    -   Recompile the Unreal Project (Live Coding or IDE).
+    -   The new field is now available in Blueprint via `UPlayerWrapper::GetNewField()`.
+
+### Implementation Details
+
+**Shared Memory Layout**
+The shared memory block contains a Ring Buffer of `FrameSlot`s.
+```odin
 FrameSlot :: struct {
     frame_number: u64,
     timestamp:    f64,
-    data:         [1024 * 512]u8, // FlatBuffer blob
+    data_size:    u32,
+    data:         [MAX_FRAME_SIZE]u8, // Raw FlatBuffer bytes
 }
+```
 
-// Odin Core Loop
-update_shared_memory :: proc(state: ^SharedState, fb_data: []u8, frame_num: u64) {
-    // 1. Calculate the next slot in the ring
-    next_idx := (state.latest_index + 1) % 64
-    
-    // 2. Copy data into the slot
-    slot := &state.frames[next_idx]
-    slot.frame_number = frame_num
-    slot.timestamp    = current_time()
-    copy(slot.data[:], fb_data)
-    
-    // 3. Atomically update the latest index
-    intrinsics.atomic_store(&state.latest_index, next_idx)
-}
-3. Unreal Implementation (The Playback Engine)
-Unreal acts as the "Time Manager." If it detects it's behind, it can "catch up" gracefully.
-
-C++
-
-// Unreal C++ Tick
-void AMyRenderer::Tick(float DeltaTime) {
-    int32 LatestIdx = SharedStatePtr->latest_index;
-    u64 LatestFrameNum = SharedStatePtr->frames[LatestIdx].frame_number;
-
-    if (LatestFrameNum > LastRenderedFrameNum) {
-        // Option A: Skip to latest (Teleport)
-        // LastRenderedFrameNum = LatestFrameNum;
-        
-        // Option B: Process all missed frames (Playback/Simulation)
-        for (u64 f = LastRenderedFrameNum + 1; f <= LatestFrameNum; ++f) {
-            int32 SlotIdx = FindSlotByFrameNumber(f); // Check the ring for this frame
-            auto FrameData = EngineProtocol::GetFramePacket(SharedStatePtr->frames[SlotIdx].data);
-            
-            // Apply physics/logic updates for this missed frame
-            SimulateFrame(FrameData);
-        }
-        LastRenderedFrameNum = LatestFrameNum;
-    }
-}
-4. Why this handles "Hitches" and "Playback"
-Catch-up Logic: If Unreal freezes for 10 frames, when it wakes up, it sees LatestFrameNum is 10 higher than its last check. Because you have a Circular Buffer, those 10 frames are still sitting in memory waiting to be read.
-
-Interpolation: With a history of frames, Unreal can actually interpolate between Frame 100 and Frame 101. This makes the game look like it's running at 144Hz even if your Odin logic core is only ticking at 60Hz.
-
-Network Replay: This is the exact same foundation used for Rollback Netcode. If a network packet arrives late, you look back into your history buffer, find the frame where the input happened, and "re-simulate" forward.
-
-5. Input 
-Input should be setup in Unreal using Enhance Input system then send to odin game
+**FlatBuffers Integration**
+-   We use a custom minimal FlatBuffers builder in Odin (`Odin/game/flatbuffers/builder.odin`) to avoid full library dependencies.
+-   Unreal uses the official `flatbuffers` library (header-only) to verify and read data.
+-   **Wrappers**: We generate `UObject` wrappers because standard C++ FlatBuffer accessors are not Blueprint-compatible. These wrappers hold a pointer to the shared memory and provide `UFUNCTION` getters.
