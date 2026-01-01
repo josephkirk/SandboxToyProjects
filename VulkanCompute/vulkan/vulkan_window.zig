@@ -13,6 +13,8 @@ pub const c = @cImport({
 // Re-export common Vulkan constants for cleaner API
 pub const VK_FORMAT_R32_SFLOAT = c.VK_FORMAT_R32_SFLOAT;
 pub const VK_FORMAT_R32_UINT = c.VK_FORMAT_R32_UINT;
+pub const VK_FORMAT_R8G8B8A8_UNORM = c.VK_FORMAT_R8G8B8A8_UNORM;
+pub const VK_FORMAT_B8G8R8A8_SRGB = c.VK_FORMAT_B8G8R8A8_SRGB;
 pub const VK_DESCRIPTOR_TYPE_STORAGE_IMAGE = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 pub const VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 pub const VK_SHADER_STAGE_COMPUTE_BIT = c.VK_SHADER_STAGE_COMPUTE_BIT;
@@ -21,12 +23,17 @@ pub const VK_SHADER_STAGE_VERTEX_BIT = c.VK_SHADER_STAGE_VERTEX_BIT;
 pub const VK_IMAGE_LAYOUT_GENERAL = c.VK_IMAGE_LAYOUT_GENERAL;
 pub const VK_IMAGE_LAYOUT_UNDEFINED = c.VK_IMAGE_LAYOUT_UNDEFINED;
 pub const VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+pub const VK_IMAGE_LAYOUT_PRESENT_SRC_KHR = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+pub const VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL = c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+pub const VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 pub const VK_PIPELINE_BIND_POINT_COMPUTE = c.VK_PIPELINE_BIND_POINT_COMPUTE;
 pub const VK_PIPELINE_BIND_POINT_GRAPHICS = c.VK_PIPELINE_BIND_POINT_GRAPHICS;
 pub const VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT = c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 pub const VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+pub const VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 pub const VK_ACCESS_SHADER_WRITE_BIT = c.VK_ACCESS_SHADER_WRITE_BIT;
 pub const VK_ACCESS_SHADER_READ_BIT = c.VK_ACCESS_SHADER_READ_BIT;
+pub const VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
 /// WindowContext handles the lifecycle of a Vulkan-enabled window on Windows (Win32).
 /// It manages the swapchain, rendering resources, and the main frame loop.
@@ -1253,6 +1260,174 @@ pub const WindowContext = struct {
 
     pub fn waitIdle(self: *WindowContext) void {
         _ = c.vkDeviceWaitIdle(self.device);
+    }
+
+    /// Returns the current swapchain image handle for the frame being rendered.
+    pub fn getCurrentSwapchainImage(self: *WindowContext) c.VkImage {
+        return self.swapchain_images[self.current_image_index];
+    }
+
+    /// Blits (scaled copy) a source image to a destination image.
+    /// Both images must be in TRANSFER_SRC/DST layouts when this is called.
+    pub fn blitImage(
+        self: *WindowContext,
+        cmdbuf: c.VkCommandBuffer,
+        srcImage: c.VkImage,
+        srcWidth: u32,
+        srcHeight: u32,
+        dstImage: c.VkImage,
+        dstWidth: u32,
+        dstHeight: u32,
+    ) void {
+        _ = self;
+        const blit = c.VkImageBlit{
+            .srcSubresource = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .srcOffsets = .{
+                .{ .x = 0, .y = 0, .z = 0 },
+                .{ .x = @intCast(srcWidth), .y = @intCast(srcHeight), .z = 1 },
+            },
+            .dstSubresource = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .dstOffsets = .{
+                .{ .x = 0, .y = 0, .z = 0 },
+                .{ .x = @intCast(dstWidth), .y = @intCast(dstHeight), .z = 1 },
+            },
+        };
+
+        c.vkCmdBlitImage(
+            cmdbuf,
+            srcImage,
+            c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            dstImage,
+            c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &blit,
+            c.VK_FILTER_LINEAR,
+        );
+    }
+
+    /// Transitions an image to TRANSFER_SRC_OPTIMAL layout for blitting.
+    pub fn transitionForBlitSrc(self: *WindowContext, cmdbuf: c.VkCommandBuffer, image: c.VkImage, oldLayout: c.VkImageLayout) void {
+        _ = self;
+        const barrier = c.VkImageMemoryBarrier{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = c.VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = c.VK_ACCESS_TRANSFER_READ_BIT,
+            .oldLayout = oldLayout,
+            .newLayout = c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        c.vkCmdPipelineBarrier(cmdbuf, c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &barrier);
+    }
+
+    /// Transitions an image to TRANSFER_DST_OPTIMAL layout for receiving blit.
+    pub fn transitionForBlitDst(self: *WindowContext, cmdbuf: c.VkCommandBuffer, image: c.VkImage, oldLayout: c.VkImageLayout) void {
+        _ = self;
+        const barrier = c.VkImageMemoryBarrier{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = 0,
+            .dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = oldLayout,
+            .newLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        c.vkCmdPipelineBarrier(cmdbuf, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &barrier);
+    }
+
+    /// Transitions an image from TRANSFER_DST_OPTIMAL to PRESENT_SRC_KHR for presentation.
+    pub fn transitionForPresent(self: *WindowContext, cmdbuf: c.VkCommandBuffer, image: c.VkImage) void {
+        _ = self;
+        const barrier = c.VkImageMemoryBarrier{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = 0,
+            .oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .newLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        c.vkCmdPipelineBarrier(cmdbuf, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, null, 0, null, 1, &barrier);
+    }
+
+    /// Transitions an image from TRANSFER_SRC back to GENERAL for compute use.
+    pub fn transitionFromBlitSrcToGeneral(self: *WindowContext, cmdbuf: c.VkCommandBuffer, image: c.VkImage) void {
+        _ = self;
+        const barrier = c.VkImageMemoryBarrier{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = c.VK_ACCESS_TRANSFER_READ_BIT,
+            .dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT | c.VK_ACCESS_SHADER_WRITE_BIT,
+            .oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            .newLayout = c.VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        c.vkCmdPipelineBarrier(cmdbuf, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+    }
+
+    /// Transitions an image from TRANSFER_DST back to GENERAL for compute use.
+    pub fn transitionFromBlitDstToGeneral(self: *WindowContext, cmdbuf: c.VkCommandBuffer, image: c.VkImage) void {
+        _ = self;
+        const barrier = c.VkImageMemoryBarrier{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT | c.VK_ACCESS_SHADER_WRITE_BIT,
+            .oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .newLayout = c.VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        c.vkCmdPipelineBarrier(cmdbuf, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
     }
 };
 
