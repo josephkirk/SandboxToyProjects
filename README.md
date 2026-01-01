@@ -19,10 +19,10 @@ A high-performance gravitational N-body simulation using the **Barnes-Hut** algo
 ![nbody](docs/nbody.gif)
 
 ### [Vulkan Compute Learning](./VulkanCompute)
-A "simple" sand simulation project implemented in **Zig** and built using directly **Vulkan** API with compute shader.
-All Vulkan codes is verbally commented for learning purposes. The project demonstrate graphic pipeline from compute ( sand sim ) with hlsl to fragment pass writen in glsl for visualization then to compute again in hlsl (TAA).
+A "simple" sand simulation project implemented in **Zig** and built using directly **Vulkan** API to learn how Vulkan and general graphic pipeline work.
+All Vulkan codes is verbally commented for learning purposes. The project demonstrate graphic pipeline from compute ( sand sim ) with hlsl to fragment pass writen in glsl for visualization then to compute again in hlsl (TAA) then post-process with CRT effect.
 
-![sand](docs/sandfall.gif)
+![sand](docs/sandfall_crt.gif)
 
 
 

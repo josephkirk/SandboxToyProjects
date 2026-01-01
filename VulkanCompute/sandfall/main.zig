@@ -17,6 +17,14 @@ const PushConstants = extern struct {
     frame: u32,
 };
 
+/// CRT Post-Process parameters - time-based effects
+const CRTParams = extern struct {
+    time: f32, // Current time in seconds
+    flickerSpeed: f32, // Speed of flicker effect
+    scanSpeed: f32, // Speed of scanning line
+    padding: f32, // Alignment padding
+};
+
 pub fn main() !void {
     std.debug.print("Initializing Window...\n", .{});
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -129,6 +137,30 @@ pub fn main() !void {
     defer ctx.destroyPipeline(taa_pipe);
 
     // =========================================================================
+    // 6. CRT POST-PROCESS COMPUTE PIPELINE (HLSL) - Final Pass
+    // =========================================================================
+    // Adds animated CRT effects: scrolling scanlines, flicker, chromatic aberration
+    // This demonstrates the FULL pipeline:
+    //   Compute(HLSL) → Fragment(GLSL) → Compute(HLSL TAA) → Compute(HLSL CRT)
+    //
+    var crtOutput = try ctx.createStorageImage(ctx.width, ctx.height, vk_win.VK_FORMAT_R8G8B8A8_UNORM);
+    defer crtOutput.destroy(ctx.device);
+
+    const crt_dsl = try ctx.createDescriptorSetLayout(&.{
+        .{ .binding = 0, .descriptorType = vk_win.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = vk_win.VK_SHADER_STAGE_COMPUTE_BIT, .pImmutableSamplers = null },
+        .{ .binding = 1, .descriptorType = vk_win.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = vk_win.VK_SHADER_STAGE_COMPUTE_BIT, .pImmutableSamplers = null },
+    });
+    defer ctx.destroyDescriptorSetLayout(crt_dsl);
+
+    const crt_pipeline_layout = try ctx.createPipelineLayout(crt_dsl, @sizeOf(CRTParams), vk_win.VK_SHADER_STAGE_COMPUTE_BIT);
+    defer ctx.destroyPipelineLayout(crt_pipeline_layout);
+
+    const crt_spirv = try vk_comp.ShaderCompiler.compile(allocator, "crt_postprocess.hlsl", "main", "cs_6_0");
+    defer allocator.free(crt_spirv);
+    const crt_pipe = try ctx.createComputePipeline(crt_spirv, crt_pipeline_layout);
+    defer ctx.destroyPipeline(crt_pipe);
+
+    // =========================================================================
     // 6. DESCRIPTOR SET ALLOCATION & BINDING
     // =========================================================================
     const setA = try ctx.allocateDescriptorSet(pool, comp_dsl);
@@ -146,6 +178,11 @@ pub fn main() !void {
     ctx.updateDescriptorSetImage(setTAA, 0, taaCurrentFrame.view, vk_win.VK_IMAGE_LAYOUT_GENERAL, vk_win.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
     ctx.updateDescriptorSetImage(setTAA, 1, taaHistory.view, vk_win.VK_IMAGE_LAYOUT_GENERAL, vk_win.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
     ctx.updateDescriptorSetImage(setTAA, 2, taaOutput.view, vk_win.VK_IMAGE_LAYOUT_GENERAL, vk_win.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+
+    // Allocate and bind CRT post-process descriptor set
+    const setCRT = try ctx.allocateDescriptorSet(pool, crt_dsl);
+    ctx.updateDescriptorSetImage(setCRT, 0, taaOutput.view, vk_win.VK_IMAGE_LAYOUT_GENERAL, vk_win.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    ctx.updateDescriptorSetImage(setCRT, 1, crtOutput.view, vk_win.VK_IMAGE_LAYOUT_GENERAL, vk_win.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
 
     // =========================================================================
     // 7. INITIALIZATION FRAME
@@ -168,13 +205,18 @@ pub fn main() !void {
         ctx.clearImage(cmdbuf, taaHistory.handle, vk_win.VK_IMAGE_LAYOUT_GENERAL, 0.0, 0.0, 0.0, 1.0);
         ctx.clearImage(cmdbuf, taaOutput.handle, vk_win.VK_IMAGE_LAYOUT_GENERAL, 0.0, 0.0, 0.0, 1.0);
 
+        // Initialize CRT output image
+        ctx.transitionImageLayout(cmdbuf, crtOutput.handle, vk_win.VK_IMAGE_LAYOUT_UNDEFINED, vk_win.VK_IMAGE_LAYOUT_GENERAL);
+        ctx.clearImage(cmdbuf, crtOutput.handle, vk_win.VK_IMAGE_LAYOUT_GENERAL, 0.0, 0.0, 0.0, 1.0);
+
         ctx.beginRenderPass(cmdbuf);
         ctx.endRenderPass(cmdbuf);
         try ctx.endFrame();
     }
 
     var frame_count: u32 = 0;
-    std.debug.print("Starting simulation loop with TAA...\n", .{});
+    const start_time = std.time.milliTimestamp();
+    std.debug.print("Starting simulation loop with TAA + CRT effects...\n", .{});
 
     // =========================================================================
     // MAIN SIMULATION LOOP
@@ -278,17 +320,42 @@ pub fn main() !void {
         ctx.dispatchCompute(cmdbuf, ctx.width / 16, ctx.height / 16, 1);
 
         // =====================================================================
-        // STAGE 5: BLIT TAA OUTPUT → SWAPCHAIN
+        // STAGE 5: CRT POST-PROCESS (Compute - HLSL)
         // =====================================================================
-        // Copy the TAA-processed result back to the swapchain for display.
-        ctx.transitionForBlitSrc(cmdbuf, taaOutput.handle, vk_win.VK_IMAGE_LAYOUT_GENERAL);
+        // Applies animated CRT effects: scrolling scanlines, flicker, chromatic
+        // aberration. This is the FINAL compute pass before display.
+        //
+        // Pipeline so far: Compute(HLSL) → Fragment(GLSL) → TAA(HLSL) → CRT(HLSL)
+        //
+        ctx.memoryBarrier(cmdbuf, vk_win.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk_win.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, vk_win.VK_ACCESS_SHADER_WRITE_BIT, vk_win.VK_ACCESS_SHADER_READ_BIT);
+
+        const current_time = std.time.milliTimestamp();
+        const elapsed_seconds: f32 = @as(f32, @floatFromInt(current_time - start_time)) / 1000.0;
+
+        const crt_params = CRTParams{
+            .time = elapsed_seconds,
+            .flickerSpeed = 15.0,
+            .scanSpeed = 2.0,
+            .padding = 0.0,
+        };
+
+        ctx.bindComputePipeline(cmdbuf, crt_pipe);
+        ctx.bindDescriptorSet(cmdbuf, vk_win.VK_PIPELINE_BIND_POINT_COMPUTE, crt_pipeline_layout, setCRT);
+        ctx.pushConstants(cmdbuf, crt_pipeline_layout, vk_win.VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(CRTParams), &crt_params);
+        ctx.dispatchCompute(cmdbuf, ctx.width / 16, ctx.height / 16, 1);
+
+        // =====================================================================
+        // STAGE 6: BLIT CRT OUTPUT → SWAPCHAIN
+        // =====================================================================
+        // Copy the final CRT-processed result to the swapchain for display.
+        ctx.transitionForBlitSrc(cmdbuf, crtOutput.handle, vk_win.VK_IMAGE_LAYOUT_GENERAL);
         ctx.transitionForBlitDst(cmdbuf, ctx.getCurrentSwapchainImage(), vk_win.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
-        ctx.blitImage(cmdbuf, taaOutput.handle, ctx.width, ctx.height, ctx.getCurrentSwapchainImage(), ctx.width, ctx.height);
+        ctx.blitImage(cmdbuf, crtOutput.handle, ctx.width, ctx.height, ctx.getCurrentSwapchainImage(), ctx.width, ctx.height);
 
         // Prepare for present and next frame
         ctx.transitionForPresent(cmdbuf, ctx.getCurrentSwapchainImage());
-        ctx.transitionFromBlitSrcToGeneral(cmdbuf, taaOutput.handle);
+        ctx.transitionFromBlitSrcToGeneral(cmdbuf, crtOutput.handle);
 
         try ctx.endFrame();
         frame_count += 1;

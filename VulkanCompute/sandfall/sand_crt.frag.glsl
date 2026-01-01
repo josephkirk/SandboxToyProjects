@@ -1,7 +1,7 @@
 #version 450
 
 // CRT Green Terminal Effect with Text Rendering for Sand Simulation
-// Renders sand/walls as actual ASCII characters
+// Renders sand/walls as actual ASCII characters (inspired by https://www.shadertoy.com/view/XdtfzX)
 
 layout(location = 0) in vec2 fragUV;
 layout(location = 0) out vec4 outColor;
