@@ -1,6 +1,6 @@
 const std = @import("std");
-const vk_win = @import("vulkan_window.zig");
-const vk_comp = @import("vulkan_compute.zig");
+const vk_win = @import("vulkan_window");
+const vk_comp = @import("vulkan_compute");
 
 // Simulation resolution. This can be lower than window resolution for performance.
 const SIM_WIDTH = 512;
