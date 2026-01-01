@@ -583,38 +583,14 @@ write_frame :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState, builder: ^f
     if len(builder.bytes) > 0 { clear(&builder.bytes) } // Actually make capacity 0? No.
     
     // 1. Prepare Data for Packing
-    // We need to map LocalGameState (Fixed) to Generated.GameState (Dynamic)
-    // Using temp allocator for the transient struct
+    // New schema: GameState only holds game metadata, not entities
+    // Entities (PlayerData, Enemy) are serialized separately if needed
     
     gen_state: gen.GameState
     gen_state.score = state.game_state.score
     gen_state.enemy_count = state.game_state.enemy_count
     gen_state.is_active = state.game_state.is_active
-    
-    // Player
-    gen_state.player.position.x = state.game_state.player.position.x
-    gen_state.player.position.y = state.game_state.player.position.y
-    gen_state.player.rotation = state.game_state.player.rotation
-    gen_state.player.slash_active = state.game_state.player.slash_active
-    gen_state.player.slash_angle = state.game_state.player.slash_angle
-    gen_state.player.health = state.game_state.player.health
-    
-    // Enemies
-    // gen_state.enemies is [dynamic]gen.Enemy
-    // Create temp array
-    active_enemies := make([dynamic]gen.Enemy, 0, state.game_state.enemy_count, context.temp_allocator)
-    
-    for i in 0..<MAX_ENEMIES {
-        e := &state.game_state.enemies[i]
-        if e.is_alive {
-            ge: gen.Enemy
-            ge.position.x = e.position.x
-            ge.position.y = e.position.y
-            ge.is_alive = true
-            append(&active_enemies, ge)
-        }
-    }
-    gen_state.enemies = active_enemies
+    gen_state.frame_number = i32(state.frame_number)
     
     // 2. Pack
     root := gen.pack_GameState(builder, gen_state)

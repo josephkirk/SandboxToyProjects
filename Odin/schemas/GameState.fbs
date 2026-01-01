@@ -1,25 +1,43 @@
 // GameState.fbs
 // FlatBuffers schema for Vampire Survival game state
+// Rules:
+// - struct: value types (USTRUCTs)
+// - table: reference types (pooled actors)
+// - tables cannot reference other tables directly
+// - GameState holds only game-level data, not entities
 
 namespace VS.Schema;
 
-struct Vec2 {
+// ========== Value Types (USTRUCTs) ==========
+
+struct Vec3 {
   x: float;
   y: float;
+  z: float;
 }
 
-table Player {
-  position: Vec2;
+// ========== Entity Tables (Pooled Actors) ==========
+
+// Player entity - managed separately, not embedded in GameState
+table PlayerData {
+  position: Vec3;
   rotation: float;
   slash_active: bool;
   slash_angle: float;
   health: int;
+  is_visible: bool;
+  id: int;
 }
 
+// Enemy entity - pooled actor
 table Enemy {
-  position: Vec2;
+  position: Vec3;
   is_alive: bool;
+  is_visible: bool;
+  id: int;
 }
+
+// ========== Enums ==========
 
 enum GameEventType : int {
   None = 0,
@@ -28,12 +46,13 @@ enum GameEventType : int {
   PlayerInput = 3
 }
 
+// ========== Root GameState ==========
+// Only holds game-level metadata, not entity data
 table GameState {
-  player: Player;
-  enemies: [Enemy];
   score: int;
   enemy_count: int;
   is_active: bool;
+  frame_number: int;
 }
 
 root_type GameState;

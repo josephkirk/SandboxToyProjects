@@ -16,11 +16,11 @@ static_assert(FLATBUFFERS_VERSION_MAJOR == 25 &&
 namespace VS {
 namespace Schema {
 
-struct Vec2;
+struct Vec3;
 
-struct Player;
-struct PlayerBuilder;
-struct PlayerT;
+struct PlayerData;
+struct PlayerDataBuilder;
+struct PlayerDataT;
 
 struct Enemy;
 struct EnemyBuilder;
@@ -66,20 +66,23 @@ inline const char *EnumNameGameEventType(GameEventType e) {
   return EnumNamesGameEventType()[index];
 }
 
-FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) Vec2 FLATBUFFERS_FINAL_CLASS {
+FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) Vec3 FLATBUFFERS_FINAL_CLASS {
  private:
   float x_;
   float y_;
+  float z_;
 
  public:
   struct Traits;
-  Vec2()
+  Vec3()
       : x_(0),
-        y_(0) {
+        y_(0),
+        z_(0) {
   }
-  Vec2(float _x, float _y)
+  Vec3(float _x, float _y, float _z)
       : x_(::flatbuffers::EndianScalar(_x)),
-        y_(::flatbuffers::EndianScalar(_y)) {
+        y_(::flatbuffers::EndianScalar(_y)),
+        z_(::flatbuffers::EndianScalar(_z)) {
   }
   float x() const {
     return ::flatbuffers::EndianScalar(x_);
@@ -87,39 +90,46 @@ FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) Vec2 FLATBUFFERS_FINAL_CLASS {
   float y() const {
     return ::flatbuffers::EndianScalar(y_);
   }
+  float z() const {
+    return ::flatbuffers::EndianScalar(z_);
+  }
 };
-FLATBUFFERS_STRUCT_END(Vec2, 8);
+FLATBUFFERS_STRUCT_END(Vec3, 12);
 
-struct Vec2::Traits {
-  using type = Vec2;
+struct Vec3::Traits {
+  using type = Vec3;
 };
 
-struct PlayerT : public ::flatbuffers::NativeTable {
-  typedef Player TableType;
-  std::unique_ptr<VS::Schema::Vec2> position{};
+struct PlayerDataT : public ::flatbuffers::NativeTable {
+  typedef PlayerData TableType;
+  std::unique_ptr<VS::Schema::Vec3> position{};
   float rotation = 0.0f;
   bool slash_active = false;
   float slash_angle = 0.0f;
   int32_t health = 0;
-  PlayerT() = default;
-  PlayerT(const PlayerT &o);
-  PlayerT(PlayerT&&) FLATBUFFERS_NOEXCEPT = default;
-  PlayerT &operator=(PlayerT o) FLATBUFFERS_NOEXCEPT;
+  bool is_visible = false;
+  int32_t id = 0;
+  PlayerDataT() = default;
+  PlayerDataT(const PlayerDataT &o);
+  PlayerDataT(PlayerDataT&&) FLATBUFFERS_NOEXCEPT = default;
+  PlayerDataT &operator=(PlayerDataT o) FLATBUFFERS_NOEXCEPT;
 };
 
-struct Player FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef PlayerT NativeTableType;
-  typedef PlayerBuilder Builder;
+struct PlayerData FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef PlayerDataT NativeTableType;
+  typedef PlayerDataBuilder Builder;
   struct Traits;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_POSITION = 4,
     VT_ROTATION = 6,
     VT_SLASH_ACTIVE = 8,
     VT_SLASH_ANGLE = 10,
-    VT_HEALTH = 12
+    VT_HEALTH = 12,
+    VT_IS_VISIBLE = 14,
+    VT_ID = 16
   };
-  const VS::Schema::Vec2 *position() const {
-    return GetStruct<const VS::Schema::Vec2 *>(VT_POSITION);
+  const VS::Schema::Vec3 *position() const {
+    return GetStruct<const VS::Schema::Vec3 *>(VT_POSITION);
   }
   float rotation() const {
     return GetField<float>(VT_ROTATION, 0.0f);
@@ -133,78 +143,98 @@ struct Player FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   int32_t health() const {
     return GetField<int32_t>(VT_HEALTH, 0);
   }
+  bool is_visible() const {
+    return GetField<uint8_t>(VT_IS_VISIBLE, 0) != 0;
+  }
+  int32_t id() const {
+    return GetField<int32_t>(VT_ID, 0);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<VS::Schema::Vec2>(verifier, VT_POSITION, 4) &&
+           VerifyField<VS::Schema::Vec3>(verifier, VT_POSITION, 4) &&
            VerifyField<float>(verifier, VT_ROTATION, 4) &&
            VerifyField<uint8_t>(verifier, VT_SLASH_ACTIVE, 1) &&
            VerifyField<float>(verifier, VT_SLASH_ANGLE, 4) &&
            VerifyField<int32_t>(verifier, VT_HEALTH, 4) &&
+           VerifyField<uint8_t>(verifier, VT_IS_VISIBLE, 1) &&
+           VerifyField<int32_t>(verifier, VT_ID, 4) &&
            verifier.EndTable();
   }
-  PlayerT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  void UnPackTo(PlayerT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
-  static ::flatbuffers::Offset<Player> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+  PlayerDataT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(PlayerDataT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<PlayerData> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerDataT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 };
 
-struct PlayerBuilder {
-  typedef Player Table;
+struct PlayerDataBuilder {
+  typedef PlayerData Table;
   ::flatbuffers::FlatBufferBuilder &fbb_;
   ::flatbuffers::uoffset_t start_;
-  void add_position(const VS::Schema::Vec2 *position) {
-    fbb_.AddStruct(Player::VT_POSITION, position);
+  void add_position(const VS::Schema::Vec3 *position) {
+    fbb_.AddStruct(PlayerData::VT_POSITION, position);
   }
   void add_rotation(float rotation) {
-    fbb_.AddElement<float>(Player::VT_ROTATION, rotation, 0.0f);
+    fbb_.AddElement<float>(PlayerData::VT_ROTATION, rotation, 0.0f);
   }
   void add_slash_active(bool slash_active) {
-    fbb_.AddElement<uint8_t>(Player::VT_SLASH_ACTIVE, static_cast<uint8_t>(slash_active), 0);
+    fbb_.AddElement<uint8_t>(PlayerData::VT_SLASH_ACTIVE, static_cast<uint8_t>(slash_active), 0);
   }
   void add_slash_angle(float slash_angle) {
-    fbb_.AddElement<float>(Player::VT_SLASH_ANGLE, slash_angle, 0.0f);
+    fbb_.AddElement<float>(PlayerData::VT_SLASH_ANGLE, slash_angle, 0.0f);
   }
   void add_health(int32_t health) {
-    fbb_.AddElement<int32_t>(Player::VT_HEALTH, health, 0);
+    fbb_.AddElement<int32_t>(PlayerData::VT_HEALTH, health, 0);
   }
-  explicit PlayerBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+  void add_is_visible(bool is_visible) {
+    fbb_.AddElement<uint8_t>(PlayerData::VT_IS_VISIBLE, static_cast<uint8_t>(is_visible), 0);
+  }
+  void add_id(int32_t id) {
+    fbb_.AddElement<int32_t>(PlayerData::VT_ID, id, 0);
+  }
+  explicit PlayerDataBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  ::flatbuffers::Offset<Player> Finish() {
+  ::flatbuffers::Offset<PlayerData> Finish() {
     const auto end = fbb_.EndTable(start_);
-    auto o = ::flatbuffers::Offset<Player>(end);
+    auto o = ::flatbuffers::Offset<PlayerData>(end);
     return o;
   }
 };
 
-inline ::flatbuffers::Offset<Player> CreatePlayer(
+inline ::flatbuffers::Offset<PlayerData> CreatePlayerData(
     ::flatbuffers::FlatBufferBuilder &_fbb,
-    const VS::Schema::Vec2 *position = nullptr,
+    const VS::Schema::Vec3 *position = nullptr,
     float rotation = 0.0f,
     bool slash_active = false,
     float slash_angle = 0.0f,
-    int32_t health = 0) {
-  PlayerBuilder builder_(_fbb);
+    int32_t health = 0,
+    bool is_visible = false,
+    int32_t id = 0) {
+  PlayerDataBuilder builder_(_fbb);
+  builder_.add_id(id);
   builder_.add_health(health);
   builder_.add_slash_angle(slash_angle);
   builder_.add_rotation(rotation);
   builder_.add_position(position);
+  builder_.add_is_visible(is_visible);
   builder_.add_slash_active(slash_active);
   return builder_.Finish();
 }
 
-struct Player::Traits {
-  using type = Player;
-  static auto constexpr Create = CreatePlayer;
+struct PlayerData::Traits {
+  using type = PlayerData;
+  static auto constexpr Create = CreatePlayerData;
 };
 
-::flatbuffers::Offset<Player> CreatePlayer(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+::flatbuffers::Offset<PlayerData> CreatePlayerData(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerDataT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
 struct EnemyT : public ::flatbuffers::NativeTable {
   typedef Enemy TableType;
-  std::unique_ptr<VS::Schema::Vec2> position{};
+  std::unique_ptr<VS::Schema::Vec3> position{};
   bool is_alive = false;
+  bool is_visible = false;
+  int32_t id = 0;
   EnemyT() = default;
   EnemyT(const EnemyT &o);
   EnemyT(EnemyT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -217,19 +247,29 @@ struct Enemy FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   struct Traits;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_POSITION = 4,
-    VT_IS_ALIVE = 6
+    VT_IS_ALIVE = 6,
+    VT_IS_VISIBLE = 8,
+    VT_ID = 10
   };
-  const VS::Schema::Vec2 *position() const {
-    return GetStruct<const VS::Schema::Vec2 *>(VT_POSITION);
+  const VS::Schema::Vec3 *position() const {
+    return GetStruct<const VS::Schema::Vec3 *>(VT_POSITION);
   }
   bool is_alive() const {
     return GetField<uint8_t>(VT_IS_ALIVE, 0) != 0;
   }
+  bool is_visible() const {
+    return GetField<uint8_t>(VT_IS_VISIBLE, 0) != 0;
+  }
+  int32_t id() const {
+    return GetField<int32_t>(VT_ID, 0);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<VS::Schema::Vec2>(verifier, VT_POSITION, 4) &&
+           VerifyField<VS::Schema::Vec3>(verifier, VT_POSITION, 4) &&
            VerifyField<uint8_t>(verifier, VT_IS_ALIVE, 1) &&
+           VerifyField<uint8_t>(verifier, VT_IS_VISIBLE, 1) &&
+           VerifyField<int32_t>(verifier, VT_ID, 4) &&
            verifier.EndTable();
   }
   EnemyT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -241,11 +281,17 @@ struct EnemyBuilder {
   typedef Enemy Table;
   ::flatbuffers::FlatBufferBuilder &fbb_;
   ::flatbuffers::uoffset_t start_;
-  void add_position(const VS::Schema::Vec2 *position) {
+  void add_position(const VS::Schema::Vec3 *position) {
     fbb_.AddStruct(Enemy::VT_POSITION, position);
   }
   void add_is_alive(bool is_alive) {
     fbb_.AddElement<uint8_t>(Enemy::VT_IS_ALIVE, static_cast<uint8_t>(is_alive), 0);
+  }
+  void add_is_visible(bool is_visible) {
+    fbb_.AddElement<uint8_t>(Enemy::VT_IS_VISIBLE, static_cast<uint8_t>(is_visible), 0);
+  }
+  void add_id(int32_t id) {
+    fbb_.AddElement<int32_t>(Enemy::VT_ID, id, 0);
   }
   explicit EnemyBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
@@ -260,10 +306,14 @@ struct EnemyBuilder {
 
 inline ::flatbuffers::Offset<Enemy> CreateEnemy(
     ::flatbuffers::FlatBufferBuilder &_fbb,
-    const VS::Schema::Vec2 *position = nullptr,
-    bool is_alive = false) {
+    const VS::Schema::Vec3 *position = nullptr,
+    bool is_alive = false,
+    bool is_visible = false,
+    int32_t id = 0) {
   EnemyBuilder builder_(_fbb);
+  builder_.add_id(id);
   builder_.add_position(position);
+  builder_.add_is_visible(is_visible);
   builder_.add_is_alive(is_alive);
   return builder_.Finish();
 }
@@ -277,15 +327,10 @@ struct Enemy::Traits {
 
 struct GameStateT : public ::flatbuffers::NativeTable {
   typedef GameState TableType;
-  std::unique_ptr<VS::Schema::PlayerT> player{};
-  std::vector<std::unique_ptr<VS::Schema::EnemyT>> enemies{};
   int32_t score = 0;
   int32_t enemy_count = 0;
   bool is_active = false;
-  GameStateT() = default;
-  GameStateT(const GameStateT &o);
-  GameStateT(GameStateT&&) FLATBUFFERS_NOEXCEPT = default;
-  GameStateT &operator=(GameStateT o) FLATBUFFERS_NOEXCEPT;
+  int32_t frame_number = 0;
 };
 
 struct GameState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -293,18 +338,11 @@ struct GameState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef GameStateBuilder Builder;
   struct Traits;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
-    VT_PLAYER = 4,
-    VT_ENEMIES = 6,
-    VT_SCORE = 8,
-    VT_ENEMY_COUNT = 10,
-    VT_IS_ACTIVE = 12
+    VT_SCORE = 4,
+    VT_ENEMY_COUNT = 6,
+    VT_IS_ACTIVE = 8,
+    VT_FRAME_NUMBER = 10
   };
-  const VS::Schema::Player *player() const {
-    return GetPointer<const VS::Schema::Player *>(VT_PLAYER);
-  }
-  const ::flatbuffers::Vector<::flatbuffers::Offset<VS::Schema::Enemy>> *enemies() const {
-    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<VS::Schema::Enemy>> *>(VT_ENEMIES);
-  }
   int32_t score() const {
     return GetField<int32_t>(VT_SCORE, 0);
   }
@@ -314,17 +352,16 @@ struct GameState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   bool is_active() const {
     return GetField<uint8_t>(VT_IS_ACTIVE, 0) != 0;
   }
+  int32_t frame_number() const {
+    return GetField<int32_t>(VT_FRAME_NUMBER, 0);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyOffset(verifier, VT_PLAYER) &&
-           verifier.VerifyTable(player()) &&
-           VerifyOffset(verifier, VT_ENEMIES) &&
-           verifier.VerifyVector(enemies()) &&
-           verifier.VerifyVectorOfTables(enemies()) &&
            VerifyField<int32_t>(verifier, VT_SCORE, 4) &&
            VerifyField<int32_t>(verifier, VT_ENEMY_COUNT, 4) &&
            VerifyField<uint8_t>(verifier, VT_IS_ACTIVE, 1) &&
+           VerifyField<int32_t>(verifier, VT_FRAME_NUMBER, 4) &&
            verifier.EndTable();
   }
   GameStateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -336,12 +373,6 @@ struct GameStateBuilder {
   typedef GameState Table;
   ::flatbuffers::FlatBufferBuilder &fbb_;
   ::flatbuffers::uoffset_t start_;
-  void add_player(::flatbuffers::Offset<VS::Schema::Player> player) {
-    fbb_.AddOffset(GameState::VT_PLAYER, player);
-  }
-  void add_enemies(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<VS::Schema::Enemy>>> enemies) {
-    fbb_.AddOffset(GameState::VT_ENEMIES, enemies);
-  }
   void add_score(int32_t score) {
     fbb_.AddElement<int32_t>(GameState::VT_SCORE, score, 0);
   }
@@ -350,6 +381,9 @@ struct GameStateBuilder {
   }
   void add_is_active(bool is_active) {
     fbb_.AddElement<uint8_t>(GameState::VT_IS_ACTIVE, static_cast<uint8_t>(is_active), 0);
+  }
+  void add_frame_number(int32_t frame_number) {
+    fbb_.AddElement<int32_t>(GameState::VT_FRAME_NUMBER, frame_number, 0);
   }
   explicit GameStateBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
@@ -364,16 +398,14 @@ struct GameStateBuilder {
 
 inline ::flatbuffers::Offset<GameState> CreateGameState(
     ::flatbuffers::FlatBufferBuilder &_fbb,
-    ::flatbuffers::Offset<VS::Schema::Player> player = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<VS::Schema::Enemy>>> enemies = 0,
     int32_t score = 0,
     int32_t enemy_count = 0,
-    bool is_active = false) {
+    bool is_active = false,
+    int32_t frame_number = 0) {
   GameStateBuilder builder_(_fbb);
+  builder_.add_frame_number(frame_number);
   builder_.add_enemy_count(enemy_count);
   builder_.add_score(score);
-  builder_.add_enemies(enemies);
-  builder_.add_player(player);
   builder_.add_is_active(is_active);
   return builder_.Finish();
 }
@@ -383,88 +415,85 @@ struct GameState::Traits {
   static auto constexpr Create = CreateGameState;
 };
 
-inline ::flatbuffers::Offset<GameState> CreateGameStateDirect(
-    ::flatbuffers::FlatBufferBuilder &_fbb,
-    ::flatbuffers::Offset<VS::Schema::Player> player = 0,
-    const std::vector<::flatbuffers::Offset<VS::Schema::Enemy>> *enemies = nullptr,
-    int32_t score = 0,
-    int32_t enemy_count = 0,
-    bool is_active = false) {
-  auto enemies__ = enemies ? _fbb.CreateVector<::flatbuffers::Offset<VS::Schema::Enemy>>(*enemies) : 0;
-  return VS::Schema::CreateGameState(
-      _fbb,
-      player,
-      enemies__,
-      score,
-      enemy_count,
-      is_active);
-}
-
 ::flatbuffers::Offset<GameState> CreateGameState(::flatbuffers::FlatBufferBuilder &_fbb, const GameStateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
-inline PlayerT::PlayerT(const PlayerT &o)
-      : position((o.position) ? new VS::Schema::Vec2(*o.position) : nullptr),
+inline PlayerDataT::PlayerDataT(const PlayerDataT &o)
+      : position((o.position) ? new VS::Schema::Vec3(*o.position) : nullptr),
         rotation(o.rotation),
         slash_active(o.slash_active),
         slash_angle(o.slash_angle),
-        health(o.health) {
+        health(o.health),
+        is_visible(o.is_visible),
+        id(o.id) {
 }
 
-inline PlayerT &PlayerT::operator=(PlayerT o) FLATBUFFERS_NOEXCEPT {
+inline PlayerDataT &PlayerDataT::operator=(PlayerDataT o) FLATBUFFERS_NOEXCEPT {
   std::swap(position, o.position);
   std::swap(rotation, o.rotation);
   std::swap(slash_active, o.slash_active);
   std::swap(slash_angle, o.slash_angle);
   std::swap(health, o.health);
+  std::swap(is_visible, o.is_visible);
+  std::swap(id, o.id);
   return *this;
 }
 
-inline PlayerT *Player::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
-  auto _o = std::make_unique<PlayerT>();
+inline PlayerDataT *PlayerData::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::make_unique<PlayerDataT>();
   UnPackTo(_o.get(), _resolver);
   return _o.release();
 }
 
-inline void Player::UnPackTo(PlayerT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+inline void PlayerData::UnPackTo(PlayerDataT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
   (void)_o;
   (void)_resolver;
-  { auto _e = position(); if (_e) _o->position = std::unique_ptr<VS::Schema::Vec2>(new VS::Schema::Vec2(*_e)); }
+  { auto _e = position(); if (_e) _o->position = std::unique_ptr<VS::Schema::Vec3>(new VS::Schema::Vec3(*_e)); }
   { auto _e = rotation(); _o->rotation = _e; }
   { auto _e = slash_active(); _o->slash_active = _e; }
   { auto _e = slash_angle(); _o->slash_angle = _e; }
   { auto _e = health(); _o->health = _e; }
+  { auto _e = is_visible(); _o->is_visible = _e; }
+  { auto _e = id(); _o->id = _e; }
 }
 
-inline ::flatbuffers::Offset<Player> CreatePlayer(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
-  return Player::Pack(_fbb, _o, _rehasher);
+inline ::flatbuffers::Offset<PlayerData> CreatePlayerData(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerDataT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return PlayerData::Pack(_fbb, _o, _rehasher);
 }
 
-inline ::flatbuffers::Offset<Player> Player::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+inline ::flatbuffers::Offset<PlayerData> PlayerData::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerDataT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
   (void)_rehasher;
   (void)_o;
-  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const PlayerT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const PlayerDataT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
   auto _position = _o->position ? _o->position.get() : nullptr;
   auto _rotation = _o->rotation;
   auto _slash_active = _o->slash_active;
   auto _slash_angle = _o->slash_angle;
   auto _health = _o->health;
-  return VS::Schema::CreatePlayer(
+  auto _is_visible = _o->is_visible;
+  auto _id = _o->id;
+  return VS::Schema::CreatePlayerData(
       _fbb,
       _position,
       _rotation,
       _slash_active,
       _slash_angle,
-      _health);
+      _health,
+      _is_visible,
+      _id);
 }
 
 inline EnemyT::EnemyT(const EnemyT &o)
-      : position((o.position) ? new VS::Schema::Vec2(*o.position) : nullptr),
-        is_alive(o.is_alive) {
+      : position((o.position) ? new VS::Schema::Vec3(*o.position) : nullptr),
+        is_alive(o.is_alive),
+        is_visible(o.is_visible),
+        id(o.id) {
 }
 
 inline EnemyT &EnemyT::operator=(EnemyT o) FLATBUFFERS_NOEXCEPT {
   std::swap(position, o.position);
   std::swap(is_alive, o.is_alive);
+  std::swap(is_visible, o.is_visible);
+  std::swap(id, o.id);
   return *this;
 }
 
@@ -477,8 +506,10 @@ inline EnemyT *Enemy::UnPack(const ::flatbuffers::resolver_function_t *_resolver
 inline void Enemy::UnPackTo(EnemyT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
   (void)_o;
   (void)_resolver;
-  { auto _e = position(); if (_e) _o->position = std::unique_ptr<VS::Schema::Vec2>(new VS::Schema::Vec2(*_e)); }
+  { auto _e = position(); if (_e) _o->position = std::unique_ptr<VS::Schema::Vec3>(new VS::Schema::Vec3(*_e)); }
   { auto _e = is_alive(); _o->is_alive = _e; }
+  { auto _e = is_visible(); _o->is_visible = _e; }
+  { auto _e = id(); _o->id = _e; }
 }
 
 inline ::flatbuffers::Offset<Enemy> CreateEnemy(::flatbuffers::FlatBufferBuilder &_fbb, const EnemyT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -491,28 +522,14 @@ inline ::flatbuffers::Offset<Enemy> Enemy::Pack(::flatbuffers::FlatBufferBuilder
   struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const EnemyT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
   auto _position = _o->position ? _o->position.get() : nullptr;
   auto _is_alive = _o->is_alive;
+  auto _is_visible = _o->is_visible;
+  auto _id = _o->id;
   return VS::Schema::CreateEnemy(
       _fbb,
       _position,
-      _is_alive);
-}
-
-inline GameStateT::GameStateT(const GameStateT &o)
-      : player((o.player) ? new VS::Schema::PlayerT(*o.player) : nullptr),
-        score(o.score),
-        enemy_count(o.enemy_count),
-        is_active(o.is_active) {
-  enemies.reserve(o.enemies.size());
-  for (const auto &enemies_ : o.enemies) { enemies.emplace_back((enemies_) ? new VS::Schema::EnemyT(*enemies_) : nullptr); }
-}
-
-inline GameStateT &GameStateT::operator=(GameStateT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(player, o.player);
-  std::swap(enemies, o.enemies);
-  std::swap(score, o.score);
-  std::swap(enemy_count, o.enemy_count);
-  std::swap(is_active, o.is_active);
-  return *this;
+      _is_alive,
+      _is_visible,
+      _id);
 }
 
 inline GameStateT *GameState::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -524,11 +541,10 @@ inline GameStateT *GameState::UnPack(const ::flatbuffers::resolver_function_t *_
 inline void GameState::UnPackTo(GameStateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
   (void)_o;
   (void)_resolver;
-  { auto _e = player(); if (_e) { if(_o->player) { _e->UnPackTo(_o->player.get(), _resolver); } else { _o->player = std::unique_ptr<VS::Schema::PlayerT>(_e->UnPack(_resolver)); } } else if (_o->player) { _o->player.reset(); } }
-  { auto _e = enemies(); if (_e) { _o->enemies.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->enemies[_i]) { _e->Get(_i)->UnPackTo(_o->enemies[_i].get(), _resolver); } else { _o->enemies[_i] = std::unique_ptr<VS::Schema::EnemyT>(_e->Get(_i)->UnPack(_resolver)); } } } else { _o->enemies.resize(0); } }
   { auto _e = score(); _o->score = _e; }
   { auto _e = enemy_count(); _o->enemy_count = _e; }
   { auto _e = is_active(); _o->is_active = _e; }
+  { auto _e = frame_number(); _o->frame_number = _e; }
 }
 
 inline ::flatbuffers::Offset<GameState> CreateGameState(::flatbuffers::FlatBufferBuilder &_fbb, const GameStateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -539,18 +555,16 @@ inline ::flatbuffers::Offset<GameState> GameState::Pack(::flatbuffers::FlatBuffe
   (void)_rehasher;
   (void)_o;
   struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GameStateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _player = _o->player ? CreatePlayer(_fbb, _o->player.get(), _rehasher) : 0;
-  auto _enemies = _o->enemies.size() ? _fbb.CreateVector<::flatbuffers::Offset<VS::Schema::Enemy>> (_o->enemies.size(), [](size_t i, _VectorArgs *__va) { return CreateEnemy(*__va->__fbb, __va->__o->enemies[i].get(), __va->__rehasher); }, &_va ) : 0;
   auto _score = _o->score;
   auto _enemy_count = _o->enemy_count;
   auto _is_active = _o->is_active;
+  auto _frame_number = _o->frame_number;
   return VS::Schema::CreateGameState(
       _fbb,
-      _player,
-      _enemies,
       _score,
       _enemy_count,
-      _is_active);
+      _is_active,
+      _frame_number);
 }
 
 inline const VS::Schema::GameState *GetGameState(const void *buf) {

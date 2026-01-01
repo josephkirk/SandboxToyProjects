@@ -4,7 +4,8 @@
 #include "VampireSurvivalGameMode.h"
 #include "Kismet/GameplayStatics.h"
 #include "VampireSurvivalSubsystem.h"
-#include "OdinClientSubsystem.h" 
+#include "OdinClientSubsystem.h"
+#include "OdinPlayerState.h"
 
 AVampireSurvivalGameMode::AVampireSurvivalGameMode() {
   PrimaryActorTick.bCanEverTick = true;
@@ -12,7 +13,7 @@ AVampireSurvivalGameMode::AVampireSurvivalGameMode() {
 }
 
 void AVampireSurvivalGameMode::BeginPlay() {
-  Super::BeginPlay(); // Handles generic connection
+  Super::BeginPlay(); // Handles generic connection + PlayerState init
 
   UGameInstance *GameInstance = GetGameInstance();
   if (GameInstance) {
@@ -32,18 +33,23 @@ void AVampireSurvivalGameMode::Tick(float DeltaTime) {
 void AVampireSurvivalGameMode::OnUpdateGameState() {
     if (!Subsystem) return;
 
-    // Get struct (Update happens inside GetLatestGameState if logic moved, or we call accessor)
-    const FGameStateWrapper& Latest = Subsystem->UpdateAndGetState();
-    CachedGameState = Latest; // Copy for Blueprint access if needed, or just use ref if careful
+    // Get game state (now only contains metadata, not entities)
+    CachedGameState = Subsystem->UpdateAndGetState();
     
-    // Access fields directly from struct
-    FVector2D PlayerPos = CachedGameState.Player.Position;
-    int32 Health = CachedGameState.Player.Health;
+    if (!CachedGameState) return;
     
-    int32 ECount = CachedGameState.Enemy_Count;
-    bool bActive = CachedGameState.Is_Active;
+    // New schema: GameState only has metadata (score, enemy_count, is_active, frame_number)
+    // Player and Enemy data would come from separate entity updates
+    int32 ECount = CachedGameState->EnemyCount;
+    bool bActive = CachedGameState->IsActive;
+    int32 Score = CachedGameState->Score;
 
-    OnGameStateReceived(PlayerPos, Health, CachedGameState.Score, ECount, bActive);
+    // For now, use placeholder values for player data
+    // TODO: Implement separate player data stream
+    FVector2D PlayerPos = FVector2D::ZeroVector;
+    int32 Health = 100;
+    
+    OnGameStateReceived(PlayerPos, Health, Score, ECount, bActive);
 }
 
 void AVampireSurvivalGameMode::HandleMoveInput(FVector2D MoveInput) {

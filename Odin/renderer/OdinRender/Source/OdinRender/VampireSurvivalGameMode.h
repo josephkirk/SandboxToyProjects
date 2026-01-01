@@ -7,7 +7,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/GameModeBase.h"
 #include "OdinClientGameMode.h"
-#include "Generated/GameStateWrappers.h"
+#include "Generated/GameStateObjects.h"
 #include "VampireSurvivalGameMode.generated.h"
 
 class UVampireSurvivalSubsystem;
@@ -21,7 +21,6 @@ public:
 
   virtual void BeginPlay() override;
   virtual void Tick(float DeltaTime) override;
-  // EndPlay handled by Parent
 
   // Override Generic Upgrade
   virtual void OnUpdateGameState() override;
@@ -42,19 +41,15 @@ public:
   void EndOdinGame();
 
   // Get raw game state
-  UFUNCTION(BlueprintCallable, Category = "VampireSurvival")
-  const FGameStateWrapper& GetCachedGameState() const { return CachedGameState; }
+  UFUNCTION(BlueprintPure, Category = "VampireSurvival")
+  UOdinGameState* GetCachedGameState() const { return CachedGameState; }
 
 protected:
   UPROPERTY()
-  UVampireSurvivalSubsystem *Subsystem;
+  UVampireSurvivalSubsystem* Subsystem;
 
   FVector2D CurrentMoveInput;
 
   UPROPERTY(BlueprintReadOnly, Category = "VampireSurvival")
-  FGameStateWrapper CachedGameState;
-
-
-  
-  // Note: Subsystem now handles delegating connection events
+  UOdinGameState* CachedGameState;
 };
