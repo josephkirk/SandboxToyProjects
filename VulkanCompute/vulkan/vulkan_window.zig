@@ -602,9 +602,12 @@ pub const WindowContext = struct {
                 WM_KEYDOWN => {
                     // wParam contains the virtual key code
                     const vk = @as(u32, @truncate(msg.wParam));
-                    // Check for number keys 1-9 (0x31-0x39) and 0 (0x30)
+                    // Check for number keys 0-9 (0x30-0x39)
                     if (vk >= 0x30 and vk <= 0x39) {
-                        self.key_pressed = @as(u8, @truncate(vk - 0x30)); // 0-9
+                        self.key_pressed = @as(u8, @truncate(vk)); // '0'-'9' ASCII
+                    } else if (vk >= 0x41 and vk <= 0x5A) {
+                        // A-Z keys (uppercase ASCII)
+                        self.key_pressed = @as(u8, @truncate(vk));
                     }
                 },
                 else => {},

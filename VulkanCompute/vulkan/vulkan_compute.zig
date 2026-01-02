@@ -476,9 +476,17 @@ pub const ShaderCompiler = struct {
         var argv_buf: [20][]const u8 = undefined;
         var argc: usize = 0;
 
+        // Check VULKAN_SDK env var
+        const sdk_path = std.process.getEnvVarOwned(allocator, "VULKAN_SDK") catch null;
+        const base_path = if (sdk_path) |path| path else "C:\\VulkanSDK\\1.4.335.0";
+        defer if (sdk_path) |path| allocator.free(path);
+
+        var compiler_path: []u8 = undefined;
+
         if (std.mem.eql(u8, extension, ".hlsl")) {
             // Use DXC for HLSL to SPIR-V
-            argv_buf[argc] = "C:\\VulkanSDK\\1.4.335.0\\Bin\\dxc.exe";
+            compiler_path = try std.fs.path.join(allocator, &.{ base_path, "Bin", "dxc.exe" });
+            argv_buf[argc] = compiler_path;
             argc += 1;
             argv_buf[argc] = "-T";
             argc += 1;
@@ -500,8 +508,8 @@ pub const ShaderCompiler = struct {
             std.mem.eql(u8, extension, ".vert") or std.mem.eql(u8, extension, ".frag"))
         {
             // Use glslc (from Vulkan SDK) for GLSL to SPIR-V
-            // glslc auto-detects stage from extension OR we can specify it
-            argv_buf[argc] = "C:\\VulkanSDK\\1.4.335.0\\Bin\\glslc.exe";
+            compiler_path = try std.fs.path.join(allocator, &.{ base_path, "Bin", "glslc.exe" });
+            argv_buf[argc] = compiler_path;
             argc += 1;
 
             // Detect shader stage from filename pattern (e.g., "foo.vert.glsl" or "foo.frag.glsl")
@@ -526,6 +534,7 @@ pub const ShaderCompiler = struct {
                     argv_buf[argc] = out_filename;
                     argc += 1;
                     // Skip the rest
+                    defer allocator.free(compiler_path); // Early free for this branch if we return
                     const argv = argv_buf[0..argc];
                     var child = std.process.Child.init(argv, allocator);
                     child.stdin_behavior = .Ignore;
@@ -571,6 +580,8 @@ pub const ShaderCompiler = struct {
         } else {
             return error.UnsupportedShaderFormat;
         }
+
+        defer allocator.free(compiler_path);
 
         const argv = argv_buf[0..argc];
 
