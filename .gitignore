@@ -21,3 +21,8 @@ Cargo.lock
 
 #Ignore Vulkan Compute
 *.spv
+
+thirdparties/*
+thirdparties/**
+thirdparties/
+!thirdparties/odin-windows-amd64-dev-2025-12a/dist/odin.exe
