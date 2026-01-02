@@ -1,0 +1,30 @@
+install
++- install ZigVulkanCompute_RadianceCascades
+   +- compile exe ZigVulkanCompute_RadianceCascades Debug native 1 errors
+imgui_backend.zig:17:39: error: expected type '?*cimport.struct_VkInstance_T', found '?*cimport.struct_VkInstance_T'
+    return vk.c.vkGetInstanceProcAddr(instance, name);
+                                      ^~~~~~~~
+imgui_backend.zig:17:39: note: pointer type child 'cimport.struct_VkInstance_T' cannot cast into pointer type child 'cimport.struct_VkInstance_T'
+.zig-cache\o\65f16ae0a7c9c07d228517a9fe1144c0\cimport.zig:4130:33: note: opaque declared here
+pub const struct_VkInstance_T = opaque {};
+                                ^~~~~~~~~
+.zig-cache\o\bff92b84e44d0cdafea71c7155713296\cimport.zig:132:33: note: opaque declared here
+pub const struct_VkInstance_T = opaque {};
+                                ^~~~~~~~~
+.zig-cache\o\bff92b84e44d0cdafea71c7155713296\cimport.zig:4364:47: note: parameter type declared here
+pub extern fn vkGetInstanceProcAddr(instance: VkInstance, pName: [*c]const u8) PFN_vkVoidFunction;
+                                              ^~~~~~~~~~
+referenced by:
+    init: imgui_backend.zig:42:72
+    run_app: main.zig:260:52
+    5 reference(s) hidden; use '-freference-trace=7' to see all references
+error: the following command failed with 1 compilation errors:
+"C:\\Users\\nguye\\scoop\\apps\\zig\\0.15.2\\zig.exe" build-exe -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\imgui.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\imgui_demo.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\imgui_draw.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\imgui_tables.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\imgui_widgets.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\dcimgui.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\backends\\imgui_impl_vulkan.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\backends\\dcimgui_impl_vulkan.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\backends\\imgui_impl_win32.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\backends\\dcimgui_impl_win32.cpp" -lvulkan-1 -lgdi32 -luser32 -ldwmapi -ODebug -I "C:\\VulkanSDK\\1.4.335.0\\Include" -I "G:\\Projects\\SandboxDev\\VulkanCompute\\radiance_cascades_2d\\..\\cimgui\\dcimgui" -I "G:\\Projects\\SandboxDev\\VulkanCompute\\radiance_cascades_2d\\..\\cimgui\\dcimgui\\backends" -I "G:\\Projects\\SandboxDev\\VulkanCompute\\radiance_cascades_2d\\..\\cimgui\\dcimgui" -I "G:\\Projects\\SandboxDev\\VulkanCompute\\radiance_cascades_2d\\..\\cimgui\\dcimgui\\backends" -L "C:\\VulkanSDK\\1.4.335.0\\Lib" --dep vulkan_window --dep vulkan_compute --dep imgui_backend "-Mroot=G:\\Projects\\SandboxDev\\VulkanCompute\\radiance_cascades_2d\\main.zig" -ODebug -I "C:\\VulkanSDK\\1.4.335.0\\Include" "-Mvulkan_window=G:\\Projects\\SandboxDev\\VulkanCompute\\vulkan\\vulkan_window.zig" -ODebug -I "C:\\VulkanSDK\\1.4.335.0\\Include" "-Mvulkan_compute=G:\\Projects\\SandboxDev\\VulkanCompute\\vulkan\\vulkan_compute.zig" -ODebug -I "G:\\Projects\\SandboxDev\\VulkanCompute\\radiance_cascades_2d\\..\\cimgui\\dcimgui" -I "G:\\Projects\\SandboxDev\\VulkanCompute\\radiance_cascades_2d\\..\\cimgui\\dcimgui\\backends" -I "C:\\VulkanSDK\\1.4.335.0\\Include" --dep vulkan_window "-Mimgui_backend=G:\\Projects\\SandboxDev\\VulkanCompute\\radiance_cascades_2d\\imgui_backend.zig" -lc++ -lc --cache-dir .zig-cache --global-cache-dir "C:\\Users\\nguye\\AppData\\Local\\zig" --name ZigVulkanCompute_RadianceCascades --zig-lib-dir "C:\\Users\\nguye\\scoop\\apps\\zig\\0.15.2\\lib\\" --listen=-
+
+Build Summary: 0/3 steps succeeded; 1 failed
+install transitive failure
++- install ZigVulkanCompute_RadianceCascades transitive failure
+   +- compile exe ZigVulkanCompute_RadianceCascades Debug native 1 errors
+
+error: the following build command failed with exit code 1:
+.zig-cache\o\d8c4323986ece2181bc513fd290568e4\build.exe C:\Users\nguye\scoop\apps\zig\0.15.2\zig.exe C:\Users\nguye\scoop\apps\zig\0.15.2\lib G:\Projects\SandboxDev\VulkanCompute\radiance_cascades_2d .zig-cache C:\Users\nguye\AppData\Local\zig --seed 0x23b92937 -Z6644ed65935c7c86

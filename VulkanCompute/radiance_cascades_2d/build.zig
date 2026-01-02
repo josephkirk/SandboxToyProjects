@@ -33,6 +33,18 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("vulkan_window", vk_win_mod);
     exe.root_module.addImport("vulkan_compute", vk_comp_mod);
 
+    // ImGui backend module
+    const imgui_mod = b.createModule(.{
+        .root_source_file = b.path("imgui_backend.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    imgui_mod.addImport("vulkan_window", vk_win_mod);
+    imgui_mod.addIncludePath(b.path("../cimgui/dcimgui"));
+    imgui_mod.addIncludePath(b.path("../cimgui/dcimgui/backends"));
+    exe.root_module.addImport("imgui_backend", imgui_mod);
+
     // Attempt to locate Vulkan SDK
     var sdk_path_opt: ?[]const u8 = null;
     if (std.process.getEnvVarOwned(b.allocator, "VULKAN_SDK")) |sdk_path| {
@@ -59,9 +71,56 @@ pub fn build(b: *std.Build) void {
         // Modules also need include paths for @cInclude
         vk_win_mod.addIncludePath(inc_lazy);
         vk_comp_mod.addIncludePath(inc_lazy);
+        imgui_mod.addIncludePath(inc_lazy);
     }
 
+    // Add cimgui include paths and sources
+    const cimgui_path = "../cimgui/dcimgui";
+    const cimgui_backends = "../cimgui/dcimgui/backends";
+
+    exe.addIncludePath(b.path(cimgui_path));
+    exe.addIncludePath(b.path(cimgui_backends));
+    exe.root_module.addIncludePath(b.path(cimgui_path));
+    exe.root_module.addIncludePath(b.path(cimgui_backends));
+
+    // Compile ImGui core C++ sources
+    const imgui_sources = [_][]const u8{
+        "imgui.cpp",
+        "imgui_demo.cpp",
+        "imgui_draw.cpp",
+        "imgui_tables.cpp",
+        "imgui_widgets.cpp",
+        "dcimgui.cpp",
+    };
+
+    for (imgui_sources) |src| {
+        exe.addCSourceFile(.{
+            .file = b.path(b.pathJoin(&.{ cimgui_path, src })),
+            .flags = &.{"-DIMGUI_IMPL_VULKAN_NO_PROTOTYPES"},
+        });
+    }
+
+    // Compile ImGui backends - Vulkan + Win32
+    const backend_sources = [_][]const u8{
+        "imgui_impl_vulkan.cpp",
+        "dcimgui_impl_vulkan.cpp",
+        "imgui_impl_win32.cpp",
+        "dcimgui_impl_win32.cpp",
+    };
+
+    for (backend_sources) |src| {
+        exe.addCSourceFile(.{
+            .file = b.path(b.pathJoin(&.{ cimgui_backends, src })),
+            .flags = &.{"-DIMGUI_IMPL_VULKAN_NO_PROTOTYPES"},
+        });
+    }
+
+    exe.linkLibCpp();
     exe.linkSystemLibrary("vulkan-1");
+    // Win32 libraries for ImGui Win32 backend
+    exe.linkSystemLibrary("gdi32");
+    exe.linkSystemLibrary("user32");
+    exe.linkSystemLibrary("dwmapi");
 
     // Install the executable
     b.installArtifact(exe);

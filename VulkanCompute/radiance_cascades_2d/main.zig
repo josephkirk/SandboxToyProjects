@@ -1,6 +1,7 @@
 const std = @import("std");
 const vk_win = @import("vulkan_window");
 const vk_comp = @import("vulkan_compute");
+const imgui = @import("imgui_backend");
 
 const c = vk_win.c;
 
@@ -168,6 +169,107 @@ fn run_app() !void {
     // Display Image
     var displayImg = try ctx.createStorageImage(ctx.width, ctx.height, c.VK_FORMAT_R8G8B8A8_UNORM);
     defer displayImg.destroy(ctx.device);
+
+    // =========================================================================
+    // ImGui Resources
+    // =========================================================================
+
+    // ImGui Descriptor Pool
+    const imgui_pool_sizes = [_]c.VkDescriptorPoolSize{
+        .{ .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 10 },
+    };
+    var imgui_pool_info = c.VkDescriptorPoolCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .flags = c.VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+        .maxSets = 10,
+        .poolSizeCount = imgui_pool_sizes.len,
+        .pPoolSizes = &imgui_pool_sizes,
+    };
+    var imgui_descriptor_pool: c.VkDescriptorPool = undefined;
+    if (c.vkCreateDescriptorPool(ctx.device, &imgui_pool_info, null, &imgui_descriptor_pool) != c.VK_SUCCESS) {
+        return error.FailedToCreateImGuiDescriptorPool;
+    }
+    defer c.vkDestroyDescriptorPool(ctx.device, imgui_descriptor_pool, null);
+
+    // ImGui Render Pass (Load existing color, don't clear)
+    const imgui_color_attachment = c.VkAttachmentDescription{
+        .format = c.VK_FORMAT_B8G8R8A8_SRGB, // Swapchain format
+        .samples = c.VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = c.VK_ATTACHMENT_LOAD_OP_LOAD, // Load blitted image
+        .storeOp = c.VK_ATTACHMENT_STORE_OP_STORE,
+        .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+    };
+    const imgui_color_ref = c.VkAttachmentReference{
+        .attachment = 0,
+        .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    };
+    const imgui_subpass = c.VkSubpassDescription{
+        .pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &imgui_color_ref,
+    };
+    const imgui_dependency = c.VkSubpassDependency{
+        .srcSubpass = c.VK_SUBPASS_EXTERNAL,
+        .dstSubpass = 0,
+        .srcStageMask = c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+        .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+    };
+    const imgui_rp_info = c.VkRenderPassCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &imgui_color_attachment,
+        .subpassCount = 1,
+        .pSubpasses = &imgui_subpass,
+        .dependencyCount = 1,
+        .pDependencies = &imgui_dependency,
+    };
+    var imgui_render_pass: c.VkRenderPass = undefined;
+    if (c.vkCreateRenderPass(ctx.device, &imgui_rp_info, null, &imgui_render_pass) != c.VK_SUCCESS) {
+        return error.FailedToCreateImGuiRenderPass;
+    }
+    defer c.vkDestroyRenderPass(ctx.device, imgui_render_pass, null);
+
+    // ImGui Framebuffers (one per swapchain image)
+    var imgui_framebuffers: [3]c.VkFramebuffer = undefined;
+    for (ctx.swapchain_image_views, 0..) |view, i| {
+        const fb_info = c.VkFramebufferCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .renderPass = imgui_render_pass,
+            .attachmentCount = 1,
+            .pAttachments = &view,
+            .width = ctx.width,
+            .height = ctx.height,
+            .layers = 1,
+        };
+        if (c.vkCreateFramebuffer(ctx.device, &fb_info, null, &imgui_framebuffers[i]) != c.VK_SUCCESS) {
+            return error.FailedToCreateImGuiFramebuffer;
+        }
+    }
+    defer {
+        for (imgui_framebuffers) |fb| {
+            c.vkDestroyFramebuffer(ctx.device, fb, null);
+        }
+    }
+
+    // Initialize ImGui
+    var imgui_backend = try imgui.ImGuiBackend.init(
+        @ptrCast(ctx.hwnd),
+        @ptrCast(ctx.device),
+        @ptrCast(ctx.physical_device),
+        @ptrCast(ctx.instance),
+        ctx.queue_family_index,
+        @ptrCast(ctx.queue),
+        @ptrCast(imgui_descriptor_pool),
+        @ptrCast(imgui_render_pass),
+        2, // minImageCount
+        @intCast(ctx.swapchain_image_views.len),
+    );
+    defer imgui_backend.shutdown();
 
     // Buffers (Host Visible)
     const lightsSize = @sizeOf(Light) * MAX_LIGHTS;
@@ -515,13 +617,62 @@ fn run_app() !void {
 
         // 4. Blit to Swapchain
         ctx.transitionForBlitSrc(cmdbuf, displayImg.handle, c.VK_IMAGE_LAYOUT_GENERAL);
-        ctx.transitionForBlitDst(cmdbuf, ctx.getCurrentSwapchainImage(), c.VK_IMAGE_LAYOUT_UNDEFINED); // Or present src
+        ctx.transitionForBlitDst(cmdbuf, ctx.getCurrentSwapchainImage(), c.VK_IMAGE_LAYOUT_UNDEFINED);
         ctx.blitImage(cmdbuf, displayImg.handle, ctx.width, ctx.height, ctx.getCurrentSwapchainImage(), ctx.width, ctx.height);
-
-        ctx.transitionForPresent(cmdbuf, ctx.getCurrentSwapchainImage());
         ctx.transitionFromBlitSrcToGeneral(cmdbuf, displayImg.handle);
 
-        // No render pass needed - we blitted directly to swapchain
+        // 5. ImGui Render Pass
+        // Transition swapchain to color attachment for ImGui rendering
+        const barrier_to_color = c.VkImageMemoryBarrier{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .newLayout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .image = ctx.getCurrentSwapchainImage(),
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        c.vkCmdPipelineBarrier(cmdbuf, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, null, 0, null, 1, &barrier_to_color);
+
+        // ImGui NewFrame
+        imgui_backend.newFrame();
+
+        // Debug UI Window
+        if (imgui.begin("Radiance Cascades Debug")) {
+            imgui.text("Controls:");
+            _ = imgui.sliderFloat("Brush Size", &brush_radius, 5.0, 100.0);
+
+            imgui.text("Colors (press 1-9 keys):");
+
+            if (imgui.button("Clear Scene")) {
+                lightCount = 0;
+                obstacleCount = 0;
+            }
+        }
+        imgui.end();
+
+        // Begin ImGui Render Pass
+        const rp_info = c.VkRenderPassBeginInfo{
+            .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .renderPass = imgui_render_pass,
+            .framebuffer = imgui_framebuffers[ctx.current_image_index],
+            .renderArea = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = ctx.width, .height = ctx.height } },
+            .clearValueCount = 0,
+            .pClearValues = null,
+        };
+        c.vkCmdBeginRenderPass(cmdbuf, &rp_info, c.VK_SUBPASS_CONTENTS_INLINE);
+        imgui_backend.render(@ptrCast(cmdbuf));
+        c.vkCmdEndRenderPass(cmdbuf);
+
+        // Final transition to present is handled by render pass finalLayout
 
         try ctx.endFrame();
         frame_count += 1;
