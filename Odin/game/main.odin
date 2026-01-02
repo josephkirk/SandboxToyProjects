@@ -744,9 +744,16 @@ main :: proc() {
         fmt.println("[HEADLESS] Running in server mode. Press Ctrl+C to exit.")
         fmt.println("[HEADLESS] Waiting for client input...")
         
+        target_tick_rate := time.Duration(16666667) // ~60 Hz (16.67ms) in nanoseconds
+        last_time := time.now()
+        
         for {
+            current_time := time.now()
+            dt := time.duration_seconds(time.diff(last_time, current_time))
+            last_time = current_time
+            
             if session.sync_can_advance(local_state.sync_strat, local_state.tick_ctrl.current_tick) {
-                res := simulation.update_tick(local_state.tick_ctrl, 1.0 / 60.0)
+                res := simulation.update_tick(local_state.tick_ctrl, dt)
                 for i in 0..<res.ticks_to_run {
                     process_input_commands(trans, &local_state)
                     update_game(trans, &local_state, f32(res.dt))
@@ -754,7 +761,13 @@ main :: proc() {
                 }
             }
             write_frame(trans, &local_state)
-            time.sleep(time.Millisecond * 16)
+            
+            // Sleep to maintain roughly 60Hz to avoid spinning 100% CPU
+            // Simple sleep for now, as we use measured dt to correct simulation speed
+            work_dur := time.diff(current_time, time.now())
+            if work_dur < target_tick_rate {
+                 time.sleep(target_tick_rate - work_dur)
+            }
         }
     } else {
         // Window mode with raylib

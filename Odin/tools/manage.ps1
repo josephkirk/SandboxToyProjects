@@ -45,6 +45,11 @@ function Build-ZigClient {
 
 function Run-OdinServer {
     Write-Host "[RUN] Starting Odin Server..." -ForegroundColor Green
+    
+    # Kill existing server if running
+    Get-Process vampire_survival -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Seconds 1
+    
     $args = @()
     if ($Headless) { $args += "--headless" }
     $args += "--transport", $Transport
@@ -58,6 +63,11 @@ function Run-OdinServer {
 function Run-ZigClient {
     if ($WithServer) {
         Write-Host "[RUN] Starting Server background process..." -ForegroundColor Cyan
+        
+        # Kill existing server if running
+        Get-Process vampire_survival -ErrorAction SilentlyContinue | Stop-Process -Force
+        Start-Sleep -Seconds 1
+
         $ServerPath = "$OdinRoot\game\vampire_survival.exe"
         $ServerArgs = "--headless --transport ipc"
         Start-Process -FilePath $ServerPath -ArgumentList $ServerArgs -NoNewWindow:$false

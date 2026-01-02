@@ -62,13 +62,16 @@ fn mainImpl() !void {
 
     var last_frame_idx: i32 = -1;
     var time_since_last_frame: f32 = 0.0;
-    const CONNECTION_TIMEOUT = 2.0;
+    const CONNECTION_TIMEOUT = 5.0;
 
     const name_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, SHARED_MEMORY_NAME);
     defer std.heap.page_allocator.free(name_w);
 
     while (!rl.WindowShouldClose()) {
         const dt = rl.GetFrameTime();
+
+        rl.BeginDrawing();
+        rl.ClearBackground(rl.Color{ .r = 0, .g = 0, .b = 0, .a = 255 }); // Safety Clear
 
         switch (state) {
             .Disconnected => {
@@ -97,13 +100,9 @@ fn mainImpl() !void {
                     }
                 }
 
-                rl.BeginDrawing();
                 rl.ClearBackground(rl.Color{ .r = 10, .g = 10, .b = 15, .a = 255 });
                 rl.DrawText("Waiting for Server...", 280, 280, 24, rl.GRAY);
                 rl.DrawText("Run 'manage.ps1 run-server' to start", 220, 320, 20, rl.DARKGRAY);
-                rl.EndDrawing();
-
-                Sleep(100);
             },
             .Connected => {
                 if (block) |blk| {
@@ -118,6 +117,7 @@ fn mainImpl() !void {
                             const slot = &blk.frames[@intCast(latest_idx)];
                             if (slot.data_size == @sizeOf(protocol.GameState)) {
                                 const state_ptr = @as(*const volatile protocol.GameState, @ptrCast(@alignCast(&slot.data[0])));
+
                                 current_game_state = state_ptr.*;
                             }
                         }
@@ -133,24 +133,39 @@ fn mainImpl() !void {
                         hMapFile = null;
                         block = null;
                         state = .Disconnected;
-                        continue;
+                    } else {
+                        // Process Input
+                        var move_vec = rl.Vector2{ .x = 0, .y = 0 };
+                        if (rl.IsKeyDown(rl.KEY_W) or rl.IsKeyDown(rl.KEY_UP)) move_vec.y -= 1;
+                        if (rl.IsKeyDown(rl.KEY_S) or rl.IsKeyDown(rl.KEY_DOWN)) move_vec.y += 1;
+                        if (rl.IsKeyDown(rl.KEY_A) or rl.IsKeyDown(rl.KEY_LEFT)) move_vec.x -= 1;
+                        if (rl.IsKeyDown(rl.KEY_D) or rl.IsKeyDown(rl.KEY_RIGHT)) move_vec.x += 1;
+
+                        if (move_vec.x != 0 or move_vec.y != 0 or last_move_vec.x != 0 or last_move_vec.y != 0) {
+                            sendMoveCommand(blk, move_vec.x, move_vec.y);
+                            last_move_vec = move_vec;
+                        }
+
+                        // Check for Restart Input (Unified place for connected state)
+                        if (!current_game_state.is_active) {
+                            if (rl.IsKeyPressed(rl.KEY_R) or rl.IsKeyPressed(rl.KEY_SPACE)) {
+                                sendGameCommand(blk, CMD_GAME_START, 1.0);
+                            }
+                        }
+
+                        drawConnectedState(&current_game_state);
                     }
-
-                    // Process Input
-                    var move_vec = rl.Vector2{ .x = 0, .y = 0 };
-                    if (rl.IsKeyDown(rl.KEY_W) or rl.IsKeyDown(rl.KEY_UP)) move_vec.y -= 1;
-                    if (rl.IsKeyDown(rl.KEY_S) or rl.IsKeyDown(rl.KEY_DOWN)) move_vec.y += 1;
-                    if (rl.IsKeyDown(rl.KEY_A) or rl.IsKeyDown(rl.KEY_LEFT)) move_vec.x -= 1;
-                    if (rl.IsKeyDown(rl.KEY_D) or rl.IsKeyDown(rl.KEY_RIGHT)) move_vec.x += 1;
-
-                    if (move_vec.x != 0 or move_vec.y != 0 or last_move_vec.x != 0 or last_move_vec.y != 0) {
-                        sendMoveCommand(blk, move_vec.x, move_vec.y);
-                        last_move_vec = move_vec;
-                    }
-
-                    renderGame(blk, &current_game_state);
                 }
             },
+        }
+
+        // Always Draw FPS on top
+        rl.DrawText(rl.TextFormat("%d FPS", rl.GetFPS()), 710, 10, 20, rl.GREEN);
+
+        rl.EndDrawing();
+
+        if (state == .Disconnected) {
+            Sleep(100);
         }
     }
 
@@ -162,10 +177,9 @@ fn mainImpl() !void {
 }
 
 // Helper to keep main clean
-fn renderGame(block: *volatile protocol.SharedMemoryBlock, gs: *const protocol.GameState) void {
-    rl.BeginDrawing();
-    defer rl.EndDrawing();
+// Unified Draw (moved to main loop)
 
+fn drawConnectedState(gs: *const protocol.GameState) void {
     rl.ClearBackground(rl.Color{ .r = 20, .g = 20, .b = 30, .a = 255 });
 
     // Draw Grid
@@ -249,11 +263,6 @@ fn renderGame(block: *volatile protocol.SharedMemoryBlock, gs: *const protocol.G
     // Game State Overlay
     if (!gs.is_active) {
         rl.DrawRectangle(0, 0, 800, 600, rl.Color{ .r = 0, .g = 0, .b = 0, .a = 150 });
-
-        // Check for Restart Input
-        if (rl.IsKeyPressed(rl.KEY_R) or rl.IsKeyPressed(rl.KEY_SPACE)) {
-            sendGameCommand(block, CMD_GAME_START, 1.0);
-        }
 
         if (p.health <= 0) {
             rl.DrawText("GAME OVER", 280, 250, 50, rl.Color{ .r = 255, .g = 50, .b = 50, .a = 255 });
