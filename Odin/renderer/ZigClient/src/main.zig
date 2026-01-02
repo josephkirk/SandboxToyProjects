@@ -143,7 +143,7 @@ fn mainImpl() !void {
                     if (rl.IsKeyDown(rl.KEY_A) or rl.IsKeyDown(rl.KEY_LEFT)) move_vec.x -= 1;
                     if (rl.IsKeyDown(rl.KEY_D) or rl.IsKeyDown(rl.KEY_RIGHT)) move_vec.x += 1;
 
-                    if (move_vec.x != last_move_vec.x or move_vec.y != last_move_vec.y) {
+                    if (move_vec.x != 0 or move_vec.y != 0 or last_move_vec.x != 0 or last_move_vec.y != 0) {
                         sendMoveCommand(blk, move_vec.x, move_vec.y);
                         last_move_vec = move_vec;
                     }
