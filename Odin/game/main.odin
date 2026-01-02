@@ -8,102 +8,32 @@ import "core:sync"
 import "core:mem"
 import "core:os"
 import "core:sys/windows"
+import "core:strconv"
 import rl "vendor:raylib"
 import fb "./flatbuffers"
 import gen "./generated"
+import "../ipc"
+import "../simulation"
+import "../session"
 
 // ============================================================================
 // Shared Memory Data Structures (Matching C++ layout for Unreal)
 // ============================================================================
 
-MAX_ENEMIES :: 100
-RING_BUFFER_SIZE :: 64
-EVENT_QUEUE_SIZE :: 16
-INPUT_RING_SIZE :: 16
-ENTITY_RING_SIZE :: 64
-COMMAND_DATA_SIZE :: 128
+// (Moved to ipc/ipc_transport.odin)
 
-// Command Type Constants (matches C++ bit flags)
-ODIN_CMD_DIR_CLIENT_TO_GAME :: 0x80
-ODIN_CMD_DIR_GAME_TO_CLIENT :: 0x40
+// Command Categories & Types
+Category :: ipc.CommandCategory
 
-// Client -> Game (0x8X)
-ODIN_CMD_INPUT          :: 0x81  // Data: input_name, Values: axis/button
-ODIN_CMD_GAME           :: 0x82  // Values[0]: 1=start, -1=end, 0=state
-
-// Game -> Client (0x4X)
-ODIN_CMD_ENTITY_SPAWN   :: 0x41  // Data: class, Values: x,y,z,yaw
-ODIN_CMD_ENTITY_DESTROY :: 0x42  // Data: entityId
-ODIN_CMD_ENTITY_UPDATE  :: 0x43  // Data: serialized FB, Values: x,y,z,visible
-ODIN_CMD_PLAYER_UPDATE  :: 0x44  // Data: serialized FB, Values: x,y,z,visible
-ODIN_CMD_PLAYER_ACTION  :: 0x45  // Data: serialized FB (skill/ability)
-ODIN_CMD_EVENT_GAMEPLAY :: 0x46  // Data: cue_name, Values: params
-
-// Unified Command Structure (40 bytes, matches C++)
-OdinCommand :: struct #packed {
-    type: u8,                            // Command type (bit flags)
-    flags: u8,                           // Reserved
-    data_length: u16,                    // Length of valid data
-    values: [4]f32,                      // Generic float4
-    data: [COMMAND_DATA_SIZE]u8,         // Name, ID, or serialized FB
-}
-#assert(size_of(OdinCommand) == 148, "OdinCommand must be 148 bytes")
-
-// Command Ring Buffer
-CommandRing :: struct($Size: i32) #packed {
-    head: i32,  // Atomic write index
-    tail: i32,  // Atomic read index  
-    commands: [Size]OdinCommand,
-}
-
-Vector2 :: struct #packed {
-    x: f32,
-    y: f32,
-}
-
-Player :: struct #packed {
-    position: Vector2,
-    rotation: f32,
-    slash_active: bool,
-    slash_angle: f32,
-    health: i32,
-    _padding: [3]u8,
-}
-
-Enemy :: struct #packed {
-    position: Vector2,
-    is_alive: bool,
-    _padding: [3]u8,
-}
-
-GameState :: struct #packed {
-    player: Player,
-    enemies: [MAX_ENEMIES]Enemy,
-    enemy_count: i32,
-    score: i32,
-    is_active: bool,
-    _padding: [3]u8,
-}
-
-MAX_FRAME_SIZE :: 16 * 1024
-
-FrameSlot :: struct #packed {
-    frame_number: u64,
-    timestamp: f64,
-    data_size: u32,
-    data: [MAX_FRAME_SIZE]u8,
-}
-
-SharedMemoryBlock :: struct #packed {
-    magic: u32,
-    version: u32,
-    frames: [RING_BUFFER_SIZE]FrameSlot,
-    latest_frame_index: i32,
-    
-    // Command Rings (unified command system)
-    input_ring: CommandRing(INPUT_RING_SIZE),   // Client -> Game
-    entity_ring: CommandRing(ENTITY_RING_SIZE), // Game -> Client
-}
+// Game -> Client Commands
+CMD_ENTITY_SPAWN   :: ipc.CMD_ACTION_SPAWN
+CMD_ENTITY_DESTROY :: ipc.CMD_ACTION_DESTROY
+CMD_ENTITY_UPDATE  :: ipc.CMD_ACTION_UPDATE
+CMD_PLAYER_UPDATE  :: ipc.CMD_STATE_PLAYER_UPDATE
+CMD_PLAYER_ACTION  :: ipc.CMD_INPUT_ACTION
+CMD_EVENT_GAMEPLAY :: ipc.CMD_EVENT_GAMEPLAY
+CMD_INPUT          :: ipc.CMD_INPUT_MOVE
+CMD_GAME           :: ipc.CMD_GAME_START
 
 // ============================================================================
 // Game Constants
@@ -123,10 +53,15 @@ SPAWN_INTERVAL :: 0.5
 // ============================================================================
 
 Config :: struct {
-    debug_mode: bool,
-    headless: bool,
-    verbose: bool,
-    debug_logging: bool,
+    debug_mode:     bool,
+    headless:       bool,
+    verbose:        bool,
+    debug_logging:  bool,
+    tick_mode:      simulation.TickMode,
+    tick_rate:      f64,
+    sync_mode:      string,
+    transport_type: string,
+    address:        string,
 }
 
 g_config: Config
@@ -145,83 +80,19 @@ LocalGameState :: struct {
     input_y: f32,
     total_kills: i32,
     last_slash_kills: i32,
+    registry: ^ipc.CommandRegistry,
+    tick_ctrl: ^simulation.TickController,
+    sync_strat: ^session.Synchronizer,
 }
 
-// ============================================================================
-// Windows API (Only Kernel32 - avoid User32 conflict with raylib)
-// ============================================================================
-
-foreign import kernel32 "system:Kernel32.lib"
-
-@(default_calling_convention = "stdcall")
-foreign kernel32 {
-    CreateFileMappingW :: proc(
-        hFile: windows.HANDLE,
-        lpFileMappingAttributes: rawptr,
-        flProtect: windows.DWORD,
-        dwMaximumSizeHigh: windows.DWORD,
-        dwMaximumSizeLow: windows.DWORD,
-        lpName: windows.LPCWSTR,
-    ) -> windows.HANDLE ---
-
-    MapViewOfFile :: proc(
-        hFileMappingObject: windows.HANDLE,
-        dwDesiredAccess: windows.DWORD,
-        dwFileOffsetHigh: windows.DWORD,
-        dwFileOffsetLow: windows.DWORD,
-        dwNumberOfBytesToMap: windows.SIZE_T,
-    ) -> rawptr ---
-
-    UnmapViewOfFile :: proc(lpBaseAddress: rawptr) -> windows.BOOL ---
-}
-
-FILE_MAP_ALL_ACCESS :: 0x000F001F
-PAGE_READWRITE :: 0x04
+// (Windows API moved to ipc/ipc_transport.odin)
 
 // ============================================================================
 // Shared Memory
 // ============================================================================
 
-SHARED_MEMORY_NAME :: "OdinVampireSurvival"
 
-SharedMemoryHandle :: struct {
-    handle: windows.HANDLE,
-    ptr: ^SharedMemoryBlock,
-}
-
-create_or_open_shared_memory :: proc() -> (SharedMemoryHandle, bool) {
-    name_wstring := windows.utf8_to_wstring(SHARED_MEMORY_NAME)
-    size := size_of(SharedMemoryBlock)
-    
-    handle := CreateFileMappingW(
-        windows.INVALID_HANDLE_VALUE,
-        nil,
-        PAGE_READWRITE,
-        0,
-        u32(size),
-        name_wstring,
-    )
-    
-    if handle == nil {
-        fmt.println("[ERROR] Failed to create shared memory")
-        return {}, false
-    }
-    
-    ptr := MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, uint(size))
-    
-    if ptr == nil {
-        windows.CloseHandle(handle)
-        fmt.println("[ERROR] Failed to map shared memory")
-        return {}, false
-    }
-    
-    return SharedMemoryHandle{handle, cast(^SharedMemoryBlock)ptr}, true
-}
-
-close_shared_memory :: proc(smh: SharedMemoryHandle) {
-    if smh.ptr != nil { UnmapViewOfFile(smh.ptr) }
-    if smh.handle != nil { windows.CloseHandle(smh.handle) }
-}
+// (Moved to ipc/ipc_transport.odin)
 
 // ============================================================================
 // Input (Using Raylib for all input - works for both window and headless)
@@ -432,7 +303,7 @@ reset_game :: proc(state: ^LocalGameState) {
     debug_log("[GAME] === NEW GAME STARTED ===\n")
 }
 
-spawn_enemy :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState) {
+spawn_enemy :: proc(trans: ^ipc.Transport, state: ^LocalGameState) {
     if state.game_state.enemy_count >= MAX_ENEMIES { return }
     
     for i in 0..<MAX_ENEMIES {
@@ -451,16 +322,16 @@ spawn_enemy :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState) {
             state.game_state.enemy_count += 1
             
             // Notify client
-            if smh != nil {
-                cmd := make_command(ODIN_CMD_ENTITY_SPAWN, {pos.x, pos.y, 0, 0}, "Enemy")
-                push_entity_command(smh, cmd)
+            if trans != nil {
+                cmd := make_command(.Action, CMD_ENTITY_SPAWN, {pos.x, pos.y, 0}, "Enemy")
+                push_entity_command(trans, cmd)
             }
             break
         }
     }
 }
 
-update_player :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState, dt: f32) {
+update_player :: proc(trans: ^ipc.Transport, state: ^LocalGameState, dt: f32) {
     move_dir := Vector2{state.input_x, state.input_y}
     len_sq := move_dir.x * move_dir.x + move_dir.y * move_dir.y
     if len_sq > 0.01 {
@@ -500,7 +371,7 @@ update_player :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState, dt: f32) 
     }
     
     // Notify client of player state
-    if smh != nil {
+    if trans != nil {
         p := &state.game_state.player
         
         // Serialize PlayerData to FlatBuffer
@@ -525,20 +396,21 @@ update_player :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState, dt: f32) 
         buf := builder.bytes[:]
         
         // Create Command
-        cmd: OdinCommand
-        cmd.type = ODIN_CMD_PLAYER_UPDATE
+        cmd: ipc.Command
+        cmd.category = .State
+        cmd.type = CMD_PLAYER_UPDATE
         // values still useful for quick debug or redundancy
-        cmd.values = {p.position.x, p.position.y, 0, p.rotation} 
+        cmd.target_pos = {p.position.x, p.position.y, 0} 
         
         // Copy FB to data
-        if len(buf) <= COMMAND_DATA_SIZE {
+        if len(buf) <= ipc.COMMAND_DATA_SIZE {
             for i in 0..<len(buf) {
                 cmd.data[i] = buf[i]
             }
             cmd.data_length = u16(len(buf))
-            push_entity_command(smh, cmd)
+            push_entity_command(trans, cmd)
         } else {
-             fmt.printf("[ERROR] PlayerData FB too large: %d > %d\n", len(buf), COMMAND_DATA_SIZE)
+             fmt.printf("[ERROR] PlayerData FB too large: %d > %d\n", len(buf), ipc.COMMAND_DATA_SIZE)
         }
     }
 }
@@ -570,7 +442,7 @@ check_slash_hits :: proc(state: ^LocalGameState) {
     }
 }
 
-update_enemies :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState, dt: f32) {
+update_enemies :: proc(trans: ^ipc.Transport, state: ^LocalGameState, dt: f32) {
     player_pos := state.game_state.player.position
     
     for i in 0..<MAX_ENEMIES {
@@ -589,7 +461,7 @@ update_enemies :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState, dt: f32)
             // For full sync, send update. Optimization: Only send if moved significantly or every N frames.
             // For now, let's skip spamming updates for enemies to keep it simple, 
             // or send it. Let's send it for correctness.
-            if smh != nil {
+            if trans != nil {
                 // Check if we can push (might fill buffer)
                 // Using entity index as ID for now via Data?
                 // Or just broadcast positions. Client maps via ID.
@@ -609,70 +481,40 @@ update_enemies :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState, dt: f32)
     }
 }
 
-update_game :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState, dt: f32) {
+update_game :: proc(trans: ^ipc.Transport, state: ^LocalGameState, dt: f32) {
     if !state.game_state.is_active { return }
     
     state.spawn_timer += dt
     if state.spawn_timer >= SPAWN_INTERVAL {
         state.spawn_timer = 0
-        spawn_enemy(smh, state)
+        spawn_enemy(trans, state)
     }
     
-    update_player(smh, state, dt)
-    update_enemies(smh, state, dt)
+    update_player(trans, state, dt)
+    update_enemies(trans, state, dt)
 }
 
 // ============================================================================
 // Command Buffer Functions (New Unified System)
 // ============================================================================
 
-// Check if there are pending input commands from client
-has_input_command :: proc(smh: ^SharedMemoryBlock) -> bool {
-    head := sync.atomic_load(&smh.input_ring.head)
-    tail := sync.atomic_load(&smh.input_ring.tail)
-    return head != tail
-}
-
-// Pop an input command from the ring buffer
-pop_input_command :: proc(smh: ^SharedMemoryBlock) -> (OdinCommand, bool) {
-    tail := sync.atomic_load(&smh.input_ring.tail)
-    head := sync.atomic_load(&smh.input_ring.head)
-    
-    if tail == head {
-        return {}, false  // Empty
-    }
-    
-    cmd := smh.input_ring.commands[tail % INPUT_RING_SIZE]
-    sync.atomic_store(&smh.input_ring.tail, (tail + 1) % INPUT_RING_SIZE)
-    return cmd, true
-}
+// (Moved to ipc package)
 
 // Push an entity command to the ring buffer (Game -> Client)
-push_entity_command :: proc(smh: ^SharedMemoryBlock, cmd: OdinCommand) -> bool {
-    head := sync.atomic_load(&smh.entity_ring.head)
-    tail := sync.atomic_load(&smh.entity_ring.tail)
-    next_head := (head + 1) % ENTITY_RING_SIZE
-    
-    // debug_log("[DEBUG] Push Entity Cmd: H=%d T=%d\n", head, tail)
-
-    if next_head == tail {
-        debug_log("[DEBUG] Entity Ring Full! H=%d T=%d\n", head, tail)
-        return false  // Full
-    }
-    
-    smh.entity_ring.commands[head] = cmd
-    sync.atomic_store(&smh.entity_ring.head, next_head)
-    return true
+push_entity_command :: proc(trans: ^ipc.Transport, cmd: ipc.Command) -> bool {
+    data := mem.slice_to_bytes([]ipc.Command{cmd})
+    return ipc.transport_send(trans, 0, data)
 }
 
 // Helper: Create a command with type and values
-make_command :: proc(cmd_type: u8, values: [4]f32 = {}, data_str: string = "") -> OdinCommand {
-    cmd: OdinCommand
+make_command :: proc(category: Category, cmd_type: u16, values: [3]f32 = {}, data_str: string = "") -> ipc.Command {
+    cmd: ipc.Command
+    cmd.category = category
     cmd.type = cmd_type
-    cmd.values = values
+    cmd.target_pos = values
     
     // Copy string data
-    data_len := min(len(data_str), COMMAND_DATA_SIZE)
+    data_len := min(len(data_str), ipc.MAX_COMMAND_DATA)
     for i in 0..<data_len {
         cmd.data[i] = data_str[i]
     }
@@ -681,62 +523,53 @@ make_command :: proc(cmd_type: u8, values: [4]f32 = {}, data_str: string = "") -
     return cmd
 }
 
+// Command Handlers
+handle_input_move :: proc(sim_state: rawptr, cmd: ^ipc.Command) {
+    state := (^LocalGameState)(sim_state)
+    state.input_x = cmd.target_pos.x
+    state.input_y = cmd.target_pos.y
+    
+    if g_config.debug_logging {
+        debug_log("[CMD] INPUT Move: x=%.2f y=%.2f\n", cmd.target_pos.x, cmd.target_pos.y)
+    }
+}
+
+handle_game_control :: proc(sim_state: rawptr, cmd: ^ipc.Command) {
+    state := (^LocalGameState)(sim_state)
+    // cmd.target_pos.x: 1=start, -1=end, 0=state change
+    if cmd.target_pos.x > 0 {
+        debug_log("[CMD] GAME_START\n")
+        reset_game(state)
+    } else if cmd.target_pos.x < 0 {
+        debug_log("[CMD] GAME_END\n")
+        state.game_state.is_active = false
+    } else {
+        data_str := string(cmd.data[:cmd.data_length])
+        debug_log("[CMD] GAME_STATE: %s\n", data_str)
+    }
+}
+
+init_registry :: proc(state: ^LocalGameState) {
+    state.registry = ipc.create_registry()
+    ipc.register_handler(state.registry, .Input, CMD_INPUT, handle_input_move)
+    ipc.register_handler(state.registry, .System, CMD_GAME, handle_game_control)
+}
+
 // Process all pending input commands
-process_input_commands :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState) {
-    for has_input_command(smh) {
-        cmd, ok := pop_input_command(smh)
-        if !ok { break }
+process_input_commands :: proc(trans: ^ipc.Transport, state: ^LocalGameState) {
+    buffer: [size_of(ipc.Command)]u8
+    
+    for {
+        _, bytes_read, ok := ipc.transport_recv(trans, buffer[:])
+        if !ok || bytes_read == 0 { break }
         
-        switch cmd.type {
-        case ODIN_CMD_INPUT:
-            // Parse input name from Data field
-            input_name := string(cmd.data[:cmd.data_length])
-            
-            // Route input by name
-            switch input_name {
-            case "Move":
-                // Values: x, y, button
-                state.input_x = cmd.values[0]
-                state.input_y = cmd.values[1]
-                if g_config.debug_logging {
-                    debug_log("[CMD] INPUT Move: x=%.2f y=%.2f\n", cmd.values[0], cmd.values[1])
-                }
-            case "Look":
-                // Values: x, y (for camera/aim)
-                // Future: state.look_x = cmd.values[0], state.look_y = cmd.values[1]
-                if g_config.debug_logging {
-                    debug_log("[CMD] INPUT Look: x=%.2f y=%.2f\n", cmd.values[0], cmd.values[1])
-                }
-            case "Action":
-                // Values: button (0 or 1)
-                // Future: trigger action when button > 0
-                if g_config.debug_logging {
-                    debug_log("[CMD] INPUT Action: %.2f\n", cmd.values[0])
-                }
-            case:
-                // Unknown input name - log for debugging
-                if g_config.debug_logging {
-                    debug_log("[CMD] INPUT '%s': values=[%.2f, %.2f, %.2f, %.2f]\n", 
-                        input_name, cmd.values[0], cmd.values[1], cmd.values[2], cmd.values[3])
-                }
-            }
-            
-        case ODIN_CMD_GAME:
-            // Values[0]: 1=start, -1=end, 0=state change
-            if cmd.values[0] > 0 {
-                debug_log("[CMD] GAME_START\n")
-                reset_game(state)
-            } else if cmd.values[0] < 0 {
-                debug_log("[CMD] GAME_END\n")
-                state.game_state.is_active = false
-            } else {
-                // State change (pause, resume, etc.)
-                data_str := string(cmd.data[:cmd.data_length])
-                debug_log("[CMD] GAME_STATE: %s\n", data_str)
-            }
-            
-        case:
-            debug_log("[CMD] Unknown command type: 0x%02X\n", cmd.type)
+        cmd := (^ipc.Command)(&buffer[0])
+        
+        // Feed to sync strategy
+        session.sync_on_command_received(state.sync_strat, cmd)
+        
+        if !ipc.dispatch_command(state.registry, state, cmd) {
+            debug_log("[CMD] No handler for Category:%v Type:%d\n", cmd.category, cmd.type)
         }
     }
 }
@@ -745,11 +578,7 @@ process_input_commands :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState) 
 // Frame Writing
 // ============================================================================
 
-// ============================================================================
-// Frame Writing
-// ============================================================================
-
-write_frame :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState, builder: ^fb.Builder) {
+write_frame :: proc(trans: ^ipc.Transport, state: ^LocalGameState, builder: ^fb.Builder) {
     state.frame_number += 1
     
     // Clear builder for new frame
@@ -778,20 +607,7 @@ write_frame :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState, builder: ^f
     buf := fb.finish(builder, root)
     
     // 4. Write to Shared Memory
-    next_idx := (sync.atomic_load(&smh.latest_frame_index) + 1) % RING_BUFFER_SIZE
-    slot := &smh.frames[next_idx]
-    
-    slot.frame_number = state.frame_number
-    slot.timestamp = f64(time.now()._nsec) / 1_000_000_000.0
-    slot.data_size = u32(len(buf))
-    
-    if len(buf) <= MAX_FRAME_SIZE {
-        mem.copy(&slot.data[0], &buf[0], len(buf))
-    } else {
-        fmt.println("ERROR: Frame too large for shared memory slot!")
-    }
-    
-    sync.atomic_store(&smh.latest_frame_index, next_idx)
+    ipc.ipc_write_frame(trans, buf, state.frame_number)
 }
 
 // ============================================================================
@@ -812,24 +628,66 @@ print_usage :: proc() {
     fmt.println("Examples:")
     fmt.println("  vampire_survival.exe                   # Normal window mode")
     fmt.println("  vampire_survival.exe --debug           # Window with debug info")
-    fmt.println("  vampire_survival.exe --headless        # Server-only (for Unreal)")
+    fmt.println("  vampire_survival.exe --sync lockstep   # Use lockstep sync")
+    fmt.println("  vampire_survival.exe --transport tcp   # Use TCP networking")
+    fmt.println("  vampire_survival.exe --address :8080   # Listen on/Connect to port 8080")
 }
 
 parse_args :: proc() -> bool {
-    args := os.args[1:]
+    g_config.tick_rate = 60.0
+    g_config.sync_mode = "auth"
+    g_config.transport_type = "ipc"
+    g_config.address = "127.0.0.1:8080"
     
-    for arg in args {
-        switch arg {
-        case "--help":
+    for i := 1; i < len(os.args); i += 1 {
+        arg := os.args[i]
+        if arg == "--headless" {
+            g_config.headless = true
+        } else if arg == "--verbose" {
+            g_config.verbose = true
+        } else if arg == "--debug" || arg == "-d" {
+            g_config.debug_mode = true
+        } else if arg == "--log" {
+            g_config.debug_logging = true
+        } else if arg == "--continuous" {
+            g_config.tick_mode = .RealTimeContinuous
+        } else if arg == "--discrete" {
+            g_config.tick_mode = .RealTimeDiscrete
+        } else if arg == "--sync" {
+            if i + 1 < len(os.args) {
+                g_config.sync_mode = os.args[i+1]
+                i += 1
+            } else {
+                fmt.println("Error: --sync requires a value (auth, lockstep, turn).")
+                print_usage()
+                return false
+            }
+        } else if arg == "--tick-rate" {
+            if i + 1 < len(os.args) {
+                rate, ok := strconv.parse_f64(os.args[i+1])
+                if ok {
+                    g_config.tick_rate = rate
+                }
+                i += 1
+            } else {
+                fmt.println("Error: --tick-rate requires a value.")
+                print_usage()
+                return false
+            }
+        } else if arg == "--transport" {
+            if i + 1 < len(os.args) {
+                g_config.transport_type = os.args[i+1]
+                i += 1
+            }
+        } else if arg == "--address" {
+            if i + 1 < len(os.args) {
+                g_config.address = os.args[i+1]
+                i += 1
+            }
+        } else if arg == "--help" || arg == "-h" {
             print_usage()
             return false
-        case "--debug", "-d":
-            g_config.debug_mode = true
-        case "--headless":
-            g_config.headless = true
-        case "--verbose":
-            g_config.verbose = true
-        case:
+        } else {
             fmt.printf("Unknown option: %s\n", arg)
             print_usage()
             return false
@@ -853,26 +711,83 @@ main :: proc() {
     
     if g_config.debug_mode { fmt.println("[CONFIG] Debug mode: ON") }
     if g_config.headless { fmt.println("[CONFIG] Mode: HEADLESS (server only)") }
-    if g_config.verbose { fmt.println("[CONFIG] Verbose logging: ON") }
     
-    fmt.println("[INIT] Shared Memory Size:", size_of(SharedMemoryBlock), "bytes")
+    trans: ^ipc.Transport
+    ok: bool
     
-    smh, ok := create_or_open_shared_memory()
+    switch g_config.transport_type {
+    case "ipc":
+        trans, ok = ipc.create_ipc_transport()
+        if ok {
+            // Set Magic and Version for IPC
+            ti := (^ipc.IPC_Transport)(trans)
+            ti.block.magic = 0x12345678
+            ti.block.version = 2
+        }
+    case "tcp":
+        trans, ok = ipc.create_tcp_transport()
+        if ok {
+            if g_config.headless {
+                ipc.tcp_listen(trans, g_config.address)
+            } else {
+                ipc.tcp_connect(trans, g_config.address)
+            }
+        }
+    case "udp":
+        trans, ok = ipc.create_udp_transport()
+        if ok {
+            if g_config.headless {
+                ipc.udp_bind(trans, g_config.address)
+            } else {
+                ipc.udp_connect(trans, g_config.address)
+            }
+        }
+    case "hybrid":
+        tcp, _ := ipc.create_tcp_transport()
+        udp, _ := ipc.create_udp_transport()
+        trans, ok = ipc.create_hybrid_transport(tcp, udp)
+        if ok {
+            if g_config.headless {
+                ipc.tcp_listen(tcp, g_config.address)
+                // udp port might need offset
+                ipc.udp_bind(udp, g_config.address) 
+            } else {
+                ipc.tcp_connect(tcp, g_config.address)
+                ipc.udp_connect(udp, g_config.address)
+            }
+        }
+    case:
+        trans, ok = ipc.create_ipc_transport()
+    }
+
     if !ok {
-        fmt.println("[ERROR] Failed to initialize shared memory")
+        fmt.println("[ERROR] Failed to initialize transport:", g_config.transport_type)
         return
     }
-    defer close_shared_memory(smh)
+    defer ipc.transport_shutdown(trans)
     
-    fmt.println("[INIT] Shared memory created: OdinVampireSurvival")
+    fmt.printf("[INIT] Transport active: %s\n", g_config.transport_type)
     fmt.println("")
     
-    // Set Magic
-    smh.ptr.magic = 0x12345678
-    smh.ptr.version = 1
-
     local_state: LocalGameState
     init_game(&local_state)
+    init_registry(&local_state)
+    
+    // Initialize Sync Strategy
+    switch g_config.sync_mode {
+    case "auth":
+        local_state.sync_strat = session.create_authoritative_synchronizer()
+    case "lockstep":
+        local_state.sync_strat = session.create_lockstep_synchronizer(1) // Single player for sim
+    case "turn":
+        local_state.sync_strat = session.create_turn_synchronizer(1)
+    case:
+        local_state.sync_strat = session.create_authoritative_synchronizer()
+    }
+    
+    local_state.tick_ctrl = simulation.create_tick_controller(g_config.tick_mode, g_config.tick_rate)
+    defer simulation.destroy_tick_controller(local_state.tick_ctrl)
+    defer ipc.destroy_registry(local_state.registry)
     
     // Initialize FlatBuffer Builder
     builder := fb.init_builder()
@@ -883,9 +798,15 @@ main :: proc() {
         fmt.println("[HEADLESS] Waiting for events from Unreal client...")
         
         for {
-            process_input_commands(smh.ptr, &local_state)
-            update_game(smh.ptr, &local_state, 1.0 / 60.0)
-            write_frame(smh.ptr, &local_state, &builder)
+            if session.sync_can_advance(local_state.sync_strat, local_state.tick_ctrl.current_tick) {
+                res := simulation.update_tick(local_state.tick_ctrl, 1.0 / 60.0)
+                for i in 0..<res.ticks_to_run {
+                    process_input_commands(trans, &local_state)
+                    update_game(trans, &local_state, f32(res.dt))
+                    session.sync_on_tick_completed(local_state.sync_strat, local_state.tick_ctrl.current_tick)
+                }
+            }
+            write_frame(trans, &local_state, &builder)
             time.sleep(time.Millisecond * 16)
         }
     } else {
@@ -901,9 +822,15 @@ main :: proc() {
         for !rl.WindowShouldClose() {
             if !poll_keyboard_input(&local_state) { break }
             
-            process_input_commands(smh.ptr, &local_state)
-            update_game(smh.ptr, &local_state, 1.0 / 60.0)
-            write_frame(smh.ptr, &local_state, &builder)
+            if session.sync_can_advance(local_state.sync_strat, local_state.tick_ctrl.current_tick) {
+                res := simulation.update_tick(local_state.tick_ctrl, f64(rl.GetFrameTime()))
+                for i in 0..<res.ticks_to_run {
+                    process_input_commands(trans, &local_state)
+                    update_game(trans, &local_state, f32(res.dt))
+                    session.sync_on_tick_completed(local_state.sync_strat, local_state.tick_ctrl.current_tick)
+                }
+            }
+            write_frame(trans, &local_state, &builder)
             draw_game(&local_state)
         }
     }

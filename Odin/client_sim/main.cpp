@@ -21,12 +21,27 @@ const int ENTITY_RING_SIZE = 64;
 // Packed Structs
 #pragma pack(push, 1)
 
+enum class CommandCategory : uint16_t {
+    None     = 0,
+    System   = 1,
+    Input    = 2,
+    State    = 3,
+    Action   = 4,
+    Movement = 5,
+    Event    = 6,
+};
+
 struct OdinCommand {
-    uint8_t type;
-    uint8_t flags;
-    uint16_t data_length;
-    float values[4];
-    uint8_t data[COMMAND_DATA_SIZE];
+    uint32_t         sequence;
+    uint64_t         tick;
+    uint32_t         player_id;
+    CommandCategory  category;
+    uint16_t         type;
+    uint16_t         flags;
+    uint32_t         target_entity;
+    float            target_pos[3];
+    uint16_t         data_length;
+    uint8_t          data[COMMAND_DATA_SIZE];
 };
 
 template <int Size>
@@ -54,10 +69,10 @@ struct SharedMemoryBlock {
 
 #pragma pack(pop)
 
-// Command Types
-const uint8_t ODIN_CMD_INPUT = 0x81;
-const uint8_t ODIN_CMD_GAME = 0x82;
-const uint8_t ODIN_CMD_PLAYER_UPDATE = 0x44;
+// Command Types (Categorized)
+const uint16_t CMD_GAME_START = 0x81;
+const uint16_t CMD_INPUT_MOVE = 0x01;
+const uint16_t CMD_STATE_PLAYER_UPDATE = 0x01;
 
 void push_input_command(SharedMemoryBlock* smh, OdinCommand cmd) {
     int32_t tail = std::atomic_load((std::atomic<int32_t>*)&smh->input_ring.tail);
@@ -75,16 +90,14 @@ void push_input_command(SharedMemoryBlock* smh, OdinCommand cmd) {
     // std::cout << "Push CMD: Type=" << (int)cmd.type << " Head=" << next_head << std::endl;
 }
 
-OdinCommand make_command(uint8_t type, float v0, float v1, float v2, float v3, const std::string& data_str = "") {
+OdinCommand make_command(CommandCategory cat, uint16_t type, float x, float y, float z, const std::string& data_str = "") {
     OdinCommand cmd = {};
+    cmd.category = cat;
     cmd.type = type;
-    cmd.values[0] = v0;
-    cmd.values[1] = v1;
-    cmd.values[2] = v2;
-    cmd.values[3] = v3;
+    cmd.target_pos[0] = x;
+    cmd.target_pos[1] = y;
+    cmd.target_pos[2] = z;
     
-#include <algorithm>
-// ...
     size_t len = std::min(data_str.length(), (size_t)COMMAND_DATA_SIZE);
     memcpy(cmd.data, data_str.c_str(), len);
     cmd.data_length = (uint16_t)len;
@@ -134,7 +147,7 @@ int main() {
     
     // 1. Send START GAME Command
     std::cout << "Sending START GAME..." << std::endl;
-    push_input_command(smh, make_command(ODIN_CMD_GAME, 1.0f, 0, 0, 0));
+    push_input_command(smh, make_command(CommandCategory::System, CMD_GAME_START, 1.0f, 0, 0));
     
     int32_t last_frame_idx = -1;
     int frames_received = 0;
@@ -177,12 +190,11 @@ int main() {
             
             // std::cout << "Entity CMD: 0x" << std::hex << (int)cmd->type << std::dec << std::endl;
             
-            if (cmd->type == ODIN_CMD_PLAYER_UPDATE) {
-                // Use raw values array: values[0]=x, values[1]=y, values[2]=0, values[3]=rotation
-                float x = cmd->values[0];
-                float y = cmd->values[1];
-                float rotation = cmd->values[3];
-                std::cerr << "CLIENT PLAYER: Pos=" << x << "," << y << " Rot=" << rotation << std::endl;
+            if (cmd->category == CommandCategory::State && cmd->type == CMD_STATE_PLAYER_UPDATE) {
+                // Use target_pos: x, y, z
+                float x = cmd->target_pos[0];
+                float y = cmd->target_pos[1];
+                std::cerr << "CLIENT PLAYER: Pos=" << x << "," << y << std::endl;
             }
             
             tail = (tail + 1) % ENTITY_RING_SIZE;
@@ -193,7 +205,7 @@ int main() {
         float t = (float)frames_received * 0.1f;
         float x = cos(t);
         float y = sin(t);
-        push_input_command(smh, make_command(ODIN_CMD_INPUT, x, y, 0, 0, "Move"));
+        push_input_command(smh, make_command(CommandCategory::Input, CMD_INPUT_MOVE, x, y, 0, "Move"));
         
         // Sim Hitching
         if (frames_received > 0 && frames_received % 100 == 0) {
@@ -206,7 +218,7 @@ int main() {
     
     // Send END GAME Command
     std::cout << "Sending END GAME..." << std::endl;
-    push_input_command(smh, make_command(ODIN_CMD_GAME, -1.0f, 0, 0, 0));
+    push_input_command(smh, make_command(CommandCategory::System, CMD_GAME_START, -1.0f, 0, 0));
     
     UnmapViewOfFile(ptr);
     CloseHandle(handle);
