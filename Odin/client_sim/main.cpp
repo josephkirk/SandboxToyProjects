@@ -7,7 +7,7 @@
 #include <cmath>
 #include <atomic>
 
-#include "GameState_generated.h"
+
 
 // Constants
 const int MAX_ENEMIES = 100;
@@ -31,7 +31,7 @@ enum class CommandCategory : uint16_t {
     Event    = 6,
 };
 
-struct OdinCommand {
+struct Command {
     uint32_t         sequence;
     uint64_t         tick;
     uint32_t         player_id;
@@ -44,11 +44,30 @@ struct OdinCommand {
     uint8_t          data[COMMAND_DATA_SIZE];
 };
 
+struct PlayerData {
+    float forward;
+    float side;
+    float up;
+    float rotation;
+    bool  slash_active;
+    float slash_angle;
+    int32_t health;
+    int32_t id;
+    int32_t frame_number;
+};
+
+struct GameState {
+    int32_t score;
+    int32_t enemy_count;
+    bool    is_active;
+    int32_t frame_number;
+};
+
 template <int Size>
 struct CommandRing {
     int32_t head;
     int32_t tail;
-    OdinCommand commands[Size];
+    Command commands[Size];
 };
 
 struct FrameSlot {
@@ -74,7 +93,7 @@ const uint16_t CMD_GAME_START = 0x81;
 const uint16_t CMD_INPUT_MOVE = 0x01;
 const uint16_t CMD_STATE_PLAYER_UPDATE = 0x01;
 
-void push_input_command(SharedMemoryBlock* smh, OdinCommand cmd) {
+void push_input_command(SharedMemoryBlock* smh, Command cmd) {
     int32_t tail = std::atomic_load((std::atomic<int32_t>*)&smh->input_ring.tail);
     int32_t head = std::atomic_load((std::atomic<int32_t>*)&smh->input_ring.head);
     
@@ -90,8 +109,8 @@ void push_input_command(SharedMemoryBlock* smh, OdinCommand cmd) {
     // std::cout << "Push CMD: Type=" << (int)cmd.type << " Head=" << next_head << std::endl;
 }
 
-OdinCommand make_command(CommandCategory cat, uint16_t type, float x, float y, float z, const std::string& data_str = "") {
-    OdinCommand cmd = {};
+Command make_command(CommandCategory cat, uint16_t type, float x, float y, float z, const std::string& data_str = "") {
+    Command cmd = {};
     cmd.category = cat;
     cmd.type = type;
     cmd.target_pos[0] = x;
@@ -131,7 +150,8 @@ int main() {
     std::cout << "Struct Sizes:" << std::endl;
     std::cout << "  FrameSlot: " << sizeof(FrameSlot) << std::endl;
     std::cout << "  SharedMemoryBlock: " << sizeof(SharedMemoryBlock) << std::endl;
-    std::cout << "  OdinCommand: " << sizeof(OdinCommand) << std::endl;
+    std::cout << "  Command: " << sizeof(Command) << std::endl;
+    std::cout << "  GameState Struct: " << sizeof(GameState) << std::endl;
     
     std::cout << "Offsets:" << std::endl;
     std::cout << "  frames: " << offsetof(SharedMemoryBlock, frames) << std::endl;
@@ -170,11 +190,10 @@ int main() {
             // Verify Frame Number
             // std::cout << "Frame: " << slot->frame_number << " Size: " << slot->data_size << std::endl;
             
-            // Parse FlatBuffer
-            if (slot->data_size > 0) {
-                auto game_state = VS::Schema::GetGameState(slot->data);
-                
-                // GameState no longer contains player data; player updates are via entity ring.
+            // Parse Raw Struct
+            if (slot->data_size >= sizeof(GameState)) {
+                auto game_state = (GameState*)slot->data;
+                // std::cout << "Score: " << game_state->score << " Enemies: " << game_state->enemy_count << std::endl;
             }
             
             last_frame_idx = latest_idx;
@@ -186,7 +205,7 @@ int main() {
         int32_t head = std::atomic_load((std::atomic<int32_t>*)&smh->entity_ring.head);
         
         while (tail != head) {
-            OdinCommand* cmd = &smh->entity_ring.commands[tail];
+            Command* cmd = &smh->entity_ring.commands[tail];
             
             // std::cout << "Entity CMD: 0x" << std::hex << (int)cmd->type << std::dec << std::endl;
             

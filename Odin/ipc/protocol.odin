@@ -40,3 +40,26 @@ CMD_STATE_GAME_UPDATE   :: 0x03
 
 // Event (0x7X)
 CMD_EVENT_GAMEPLAY :: 0x01
+
+// ============================================================================
+// Protocol Structures (Shared between Odin/Zig/C++)
+// ============================================================================
+
+PlayerData :: struct #packed {
+    forward: f32,
+    side: f32,
+    up: f32,
+    rotation: f32,
+    slash_active: bool,
+    slash_angle: f32,
+    health: i32,
+    id: i32,
+    frame_number: i32,
+}
+
+GameState :: struct #packed {
+    score: i32,
+    enemy_count: i32,
+    is_active: bool,
+    frame_number: i32,
+}

@@ -10,8 +10,6 @@ import "core:os"
 import "core:sys/windows"
 import "core:strconv"
 import rl "vendor:raylib"
-import fb "./flatbuffers"
-import gen "./generated"
 import "../ipc"
 import "../simulation"
 import "../session"
@@ -374,11 +372,7 @@ update_player :: proc(trans: ^ipc.Transport, state: ^LocalGameState, dt: f32) {
     if trans != nil {
         p := &state.game_state.player
         
-        // Serialize PlayerData to FlatBuffer
-        builder := fb.init_builder()
-
-        
-        pd := gen.PlayerData{
+        pd := ipc.PlayerData{
             forward = p.position.x,
             side = p.position.y,
             up = 0,
@@ -390,28 +384,16 @@ update_player :: proc(trans: ^ipc.Transport, state: ^LocalGameState, dt: f32) {
             frame_number = i32(state.frame_number),
         }
         
-        off := gen.pack_PlayerData(&builder, pd)
-        fb.finish(&builder, off)
-        
-        buf := builder.bytes[:]
-        
         // Create Command
         cmd: ipc.Command
         cmd.category = .State
-        cmd.type = CMD_PLAYER_UPDATE
-        // values still useful for quick debug or redundancy
+        cmd.type = ipc.CMD_STATE_PLAYER_UPDATE
         cmd.target_pos = {p.position.x, p.position.y, 0} 
         
-        // Copy FB to data
-        if len(buf) <= ipc.COMMAND_DATA_SIZE {
-            for i in 0..<len(buf) {
-                cmd.data[i] = buf[i]
-            }
-            cmd.data_length = u16(len(buf))
-            push_entity_command(trans, cmd)
-        } else {
-             fmt.printf("[ERROR] PlayerData FB too large: %d > %d\n", len(buf), ipc.COMMAND_DATA_SIZE)
-        }
+        // Copy struct to data
+        mem.copy(&cmd.data[0], &pd, size_of(ipc.PlayerData))
+        cmd.data_length = u16(size_of(ipc.PlayerData))
+        push_entity_command(trans, cmd)
     }
 }
 
@@ -578,35 +560,18 @@ process_input_commands :: proc(trans: ^ipc.Transport, state: ^LocalGameState) {
 // Frame Writing
 // ============================================================================
 
-write_frame :: proc(trans: ^ipc.Transport, state: ^LocalGameState, builder: ^fb.Builder) {
+write_frame :: proc(trans: ^ipc.Transport, state: ^LocalGameState) {
     state.frame_number += 1
     
-    // Clear builder for new frame
-    fb.init_builder_reuse(builder) // Helper to reuse buffer? Or just make new one.
-    // My minimal builder `init_builder` makes new arrays. 
-    // Optimization: Reuse memory. 
-    // ensuring builder.bytes is clear.
-    builder.bytes = make([dynamic]byte, 0, 1024, context.temp_allocator)
-    if len(builder.bytes) > 0 { clear(&builder.bytes) } // Actually make capacity 0? No.
+    gs := ipc.GameState{
+        score = state.game_state.score,
+        enemy_count = state.game_state.enemy_count,
+        is_active = state.game_state.is_active,
+        frame_number = i32(state.frame_number),
+    }
     
-    // 1. Prepare Data for Packing
-    // New schema: GameState only holds game metadata, not entities
-    // Entities (PlayerData, Enemy) are serialized separately if needed
-    
-    gen_state: gen.GameState
-    gen_state.score = state.game_state.score
-    gen_state.enemy_count = state.game_state.enemy_count
-    gen_state.is_active = state.game_state.is_active
-    gen_state.frame_number = i32(state.frame_number)
-
-    
-    // 2. Pack
-    root := gen.pack_GameState(builder, gen_state)
-    
-    // 3. Finish
-    buf := fb.finish(builder, root)
-    
-    // 4. Write to Shared Memory
+    // Copy struct to bytes for writing
+    buf := mem.slice_to_bytes([]ipc.GameState{gs})
     ipc.ipc_write_frame(trans, buf, state.frame_number)
 }
 
@@ -789,9 +754,6 @@ main :: proc() {
     defer simulation.destroy_tick_controller(local_state.tick_ctrl)
     defer ipc.destroy_registry(local_state.registry)
     
-    // Initialize FlatBuffer Builder
-    builder := fb.init_builder()
-    
     if g_config.headless {
         // Headless mode - just write frames for Unreal
         fmt.println("[HEADLESS] Running in server mode. Press Ctrl+C to exit.")
@@ -806,7 +768,7 @@ main :: proc() {
                     session.sync_on_tick_completed(local_state.sync_strat, local_state.tick_ctrl.current_tick)
                 }
             }
-            write_frame(trans, &local_state, &builder)
+            write_frame(trans, &local_state)
             time.sleep(time.Millisecond * 16)
         }
     } else {
@@ -830,7 +792,7 @@ main :: proc() {
                     session.sync_on_tick_completed(local_state.sync_strat, local_state.tick_ctrl.current_tick)
                 }
             }
-            write_frame(trans, &local_state, &builder)
+            write_frame(trans, &local_state)
             draw_game(&local_state)
         }
     }
