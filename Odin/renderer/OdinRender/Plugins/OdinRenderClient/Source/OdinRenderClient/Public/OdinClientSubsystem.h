@@ -6,18 +6,30 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
+#include "Tickable.h"
 #include "OdinClientTypes.h"
 #include "OdinClientSubsystem.generated.h"
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOdinConnectionDelegate);
 
 UCLASS()
-class ODINRENDERCLIENT_API UOdinClientSubsystem : public UGameInstanceSubsystem {
+class ODINRENDERCLIENT_API UOdinClientSubsystem : public UGameInstanceSubsystem, public FTickableGameObject {
     GENERATED_BODY()
 
 public:
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
     virtual void Deinitialize() override;
+    
+    // FTickableGameObject implementation
+    virtual void Tick(float DeltaTime) override;
+    virtual TStatId GetStatId() const override { return TStatId(); }
+    virtual bool IsTickable() const override { return IsConnected(); }
+
+    /**
+     * Helper to get the OdinClientSubsystem from a world context object.
+     */
+    UFUNCTION(BlueprintPure, Category = "OdinClient", meta = (WorldContext = "WorldContextObject"))
+    static UOdinClientSubsystem* Get(const UObject* WorldContextObject);
 
     UFUNCTION(BlueprintCallable, Category = "OdinClient")
     bool ConnectToOdin(FString SharedMemoryName);
@@ -48,7 +60,6 @@ public:
     bool HasEntityCommand() const;
     
     // Pop entity command from game (Game -> Client)
-    // Not Blueprint-exposed since FOdinCommand is a raw packed struct
     bool PopEntityCommand(FOdinCommand& OutCommand);
     
     // Helper to create command struct
@@ -59,12 +70,39 @@ public:
 
     UPROPERTY(BlueprintAssignable, Category = "OdinClient")
     FOdinConnectionDelegate OnDisconnected;
+    
+
+    
+    // Frame Delegate
+    UPROPERTY(BlueprintAssignable, Category = "OdinClient|Events")
+    FOdinFrameReceivedDelegate OnFrameReceived;
+    
+    // Command Delegates
+    UPROPERTY(BlueprintAssignable, Category = "OdinClient|Events")
+    FOdinEntitySpawnDelegate OnEntitySpawn;
+    
+    UPROPERTY(BlueprintAssignable, Category = "OdinClient|Events")
+    FOdinEntityDestroyDelegate OnEntityDestroy;
+    
+    UPROPERTY(BlueprintAssignable, Category = "OdinClient|Events")
+    FOdinEntityUpdateDelegate OnEntityUpdate;
+    
+    UPROPERTY(BlueprintAssignable, Category = "OdinClient|Events")
+    FOdinPlayerUpdateDelegate OnPlayerUpdate;
+    
+    UPROPERTY(BlueprintAssignable, Category = "OdinClient|Events")
+    FOdinGameplayEventDelegate OnGameplayEvent;
 
 private:
     void* SharedMemoryHandle = nullptr;
     FOdinSharedMemoryBlock* SharedMemory = nullptr;
     
+    // Process incoming commands from ring buffer
+    void ProcessCommandQueue();
+    
     // Internal command push/pop
     bool PushCommand(TOdinCommandRing<ODIN_INPUT_RING_SIZE>& Ring, const FOdinCommand& Cmd);
     bool PopCommand(TOdinCommandRing<ODIN_ENTITY_RING_SIZE>& Ring, FOdinCommand& OutCmd);
+
+    int32 LastBroadcastFrameIndex = -1;
 };

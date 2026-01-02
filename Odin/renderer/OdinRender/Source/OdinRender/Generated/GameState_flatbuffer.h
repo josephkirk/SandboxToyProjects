@@ -16,8 +16,6 @@ static_assert(FLATBUFFERS_VERSION_MAJOR == 25 &&
 namespace VS {
 namespace Schema {
 
-struct Vec3;
-
 struct PlayerData;
 struct PlayerDataBuilder;
 struct PlayerDataT;
@@ -30,53 +28,18 @@ struct GameState;
 struct GameStateBuilder;
 struct GameStateT;
 
-FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) Vec3 FLATBUFFERS_FINAL_CLASS {
- private:
-  float x_;
-  float y_;
-  float z_;
-
- public:
-  struct Traits;
-  Vec3()
-      : x_(0),
-        y_(0),
-        z_(0) {
-  }
-  Vec3(float _x, float _y, float _z)
-      : x_(::flatbuffers::EndianScalar(_x)),
-        y_(::flatbuffers::EndianScalar(_y)),
-        z_(::flatbuffers::EndianScalar(_z)) {
-  }
-  float x() const {
-    return ::flatbuffers::EndianScalar(x_);
-  }
-  float y() const {
-    return ::flatbuffers::EndianScalar(y_);
-  }
-  float z() const {
-    return ::flatbuffers::EndianScalar(z_);
-  }
-};
-FLATBUFFERS_STRUCT_END(Vec3, 12);
-
-struct Vec3::Traits {
-  using type = Vec3;
-};
-
 struct PlayerDataT : public ::flatbuffers::NativeTable {
   typedef PlayerData TableType;
-  std::unique_ptr<VS::Schema::Vec3> position{};
+  float forward = 0.0f;
+  float side = 0.0f;
+  float up = 0.0f;
   float rotation = 0.0f;
   bool slash_active = false;
   float slash_angle = 0.0f;
   int32_t health = 0;
-  bool is_visible = false;
+  bool is_visible = true;
   int32_t id = 0;
-  PlayerDataT() = default;
-  PlayerDataT(const PlayerDataT &o);
-  PlayerDataT(PlayerDataT&&) FLATBUFFERS_NOEXCEPT = default;
-  PlayerDataT &operator=(PlayerDataT o) FLATBUFFERS_NOEXCEPT;
+  int32_t frame_number = 0;
 };
 
 struct PlayerData FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -84,16 +47,25 @@ struct PlayerData FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef PlayerDataBuilder Builder;
   struct Traits;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
-    VT_POSITION = 4,
-    VT_ROTATION = 6,
-    VT_SLASH_ACTIVE = 8,
-    VT_SLASH_ANGLE = 10,
-    VT_HEALTH = 12,
-    VT_IS_VISIBLE = 14,
-    VT_ID = 16
+    VT_FORWARD = 4,
+    VT_SIDE = 6,
+    VT_UP = 8,
+    VT_ROTATION = 10,
+    VT_SLASH_ACTIVE = 12,
+    VT_SLASH_ANGLE = 14,
+    VT_HEALTH = 16,
+    VT_IS_VISIBLE = 18,
+    VT_ID = 20,
+    VT_FRAME_NUMBER = 22
   };
-  const VS::Schema::Vec3 *position() const {
-    return GetStruct<const VS::Schema::Vec3 *>(VT_POSITION);
+  float forward() const {
+    return GetField<float>(VT_FORWARD, 0.0f);
+  }
+  float side() const {
+    return GetField<float>(VT_SIDE, 0.0f);
+  }
+  float up() const {
+    return GetField<float>(VT_UP, 0.0f);
   }
   float rotation() const {
     return GetField<float>(VT_ROTATION, 0.0f);
@@ -108,21 +80,27 @@ struct PlayerData FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     return GetField<int32_t>(VT_HEALTH, 0);
   }
   bool is_visible() const {
-    return GetField<uint8_t>(VT_IS_VISIBLE, 0) != 0;
+    return GetField<uint8_t>(VT_IS_VISIBLE, 1) != 0;
   }
   int32_t id() const {
     return GetField<int32_t>(VT_ID, 0);
   }
+  int32_t frame_number() const {
+    return GetField<int32_t>(VT_FRAME_NUMBER, 0);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<VS::Schema::Vec3>(verifier, VT_POSITION, 4) &&
+           VerifyField<float>(verifier, VT_FORWARD, 4) &&
+           VerifyField<float>(verifier, VT_SIDE, 4) &&
+           VerifyField<float>(verifier, VT_UP, 4) &&
            VerifyField<float>(verifier, VT_ROTATION, 4) &&
            VerifyField<uint8_t>(verifier, VT_SLASH_ACTIVE, 1) &&
            VerifyField<float>(verifier, VT_SLASH_ANGLE, 4) &&
            VerifyField<int32_t>(verifier, VT_HEALTH, 4) &&
            VerifyField<uint8_t>(verifier, VT_IS_VISIBLE, 1) &&
            VerifyField<int32_t>(verifier, VT_ID, 4) &&
+           VerifyField<int32_t>(verifier, VT_FRAME_NUMBER, 4) &&
            verifier.EndTable();
   }
   PlayerDataT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -134,8 +112,14 @@ struct PlayerDataBuilder {
   typedef PlayerData Table;
   ::flatbuffers::FlatBufferBuilder &fbb_;
   ::flatbuffers::uoffset_t start_;
-  void add_position(const VS::Schema::Vec3 *position) {
-    fbb_.AddStruct(PlayerData::VT_POSITION, position);
+  void add_forward(float forward) {
+    fbb_.AddElement<float>(PlayerData::VT_FORWARD, forward, 0.0f);
+  }
+  void add_side(float side) {
+    fbb_.AddElement<float>(PlayerData::VT_SIDE, side, 0.0f);
+  }
+  void add_up(float up) {
+    fbb_.AddElement<float>(PlayerData::VT_UP, up, 0.0f);
   }
   void add_rotation(float rotation) {
     fbb_.AddElement<float>(PlayerData::VT_ROTATION, rotation, 0.0f);
@@ -150,10 +134,13 @@ struct PlayerDataBuilder {
     fbb_.AddElement<int32_t>(PlayerData::VT_HEALTH, health, 0);
   }
   void add_is_visible(bool is_visible) {
-    fbb_.AddElement<uint8_t>(PlayerData::VT_IS_VISIBLE, static_cast<uint8_t>(is_visible), 0);
+    fbb_.AddElement<uint8_t>(PlayerData::VT_IS_VISIBLE, static_cast<uint8_t>(is_visible), 1);
   }
   void add_id(int32_t id) {
     fbb_.AddElement<int32_t>(PlayerData::VT_ID, id, 0);
+  }
+  void add_frame_number(int32_t frame_number) {
+    fbb_.AddElement<int32_t>(PlayerData::VT_FRAME_NUMBER, frame_number, 0);
   }
   explicit PlayerDataBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
@@ -168,19 +155,25 @@ struct PlayerDataBuilder {
 
 inline ::flatbuffers::Offset<PlayerData> CreatePlayerData(
     ::flatbuffers::FlatBufferBuilder &_fbb,
-    const VS::Schema::Vec3 *position = nullptr,
+    float forward = 0.0f,
+    float side = 0.0f,
+    float up = 0.0f,
     float rotation = 0.0f,
     bool slash_active = false,
     float slash_angle = 0.0f,
     int32_t health = 0,
-    bool is_visible = false,
-    int32_t id = 0) {
+    bool is_visible = true,
+    int32_t id = 0,
+    int32_t frame_number = 0) {
   PlayerDataBuilder builder_(_fbb);
+  builder_.add_frame_number(frame_number);
   builder_.add_id(id);
   builder_.add_health(health);
   builder_.add_slash_angle(slash_angle);
   builder_.add_rotation(rotation);
-  builder_.add_position(position);
+  builder_.add_up(up);
+  builder_.add_side(side);
+  builder_.add_forward(forward);
   builder_.add_is_visible(is_visible);
   builder_.add_slash_active(slash_active);
   return builder_.Finish();
@@ -195,14 +188,13 @@ struct PlayerData::Traits {
 
 struct EnemyT : public ::flatbuffers::NativeTable {
   typedef Enemy TableType;
-  std::unique_ptr<VS::Schema::Vec3> position{};
+  float forward = 0.0f;
+  float side = 0.0f;
+  float up = 0.0f;
   bool is_alive = false;
-  bool is_visible = false;
+  bool is_visible = true;
   int32_t id = 0;
-  EnemyT() = default;
-  EnemyT(const EnemyT &o);
-  EnemyT(EnemyT&&) FLATBUFFERS_NOEXCEPT = default;
-  EnemyT &operator=(EnemyT o) FLATBUFFERS_NOEXCEPT;
+  int32_t frame_number = 0;
 };
 
 struct Enemy FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -210,30 +202,45 @@ struct Enemy FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef EnemyBuilder Builder;
   struct Traits;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
-    VT_POSITION = 4,
-    VT_IS_ALIVE = 6,
-    VT_IS_VISIBLE = 8,
-    VT_ID = 10
+    VT_FORWARD = 4,
+    VT_SIDE = 6,
+    VT_UP = 8,
+    VT_IS_ALIVE = 10,
+    VT_IS_VISIBLE = 12,
+    VT_ID = 14,
+    VT_FRAME_NUMBER = 16
   };
-  const VS::Schema::Vec3 *position() const {
-    return GetStruct<const VS::Schema::Vec3 *>(VT_POSITION);
+  float forward() const {
+    return GetField<float>(VT_FORWARD, 0.0f);
+  }
+  float side() const {
+    return GetField<float>(VT_SIDE, 0.0f);
+  }
+  float up() const {
+    return GetField<float>(VT_UP, 0.0f);
   }
   bool is_alive() const {
     return GetField<uint8_t>(VT_IS_ALIVE, 0) != 0;
   }
   bool is_visible() const {
-    return GetField<uint8_t>(VT_IS_VISIBLE, 0) != 0;
+    return GetField<uint8_t>(VT_IS_VISIBLE, 1) != 0;
   }
   int32_t id() const {
     return GetField<int32_t>(VT_ID, 0);
   }
+  int32_t frame_number() const {
+    return GetField<int32_t>(VT_FRAME_NUMBER, 0);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<VS::Schema::Vec3>(verifier, VT_POSITION, 4) &&
+           VerifyField<float>(verifier, VT_FORWARD, 4) &&
+           VerifyField<float>(verifier, VT_SIDE, 4) &&
+           VerifyField<float>(verifier, VT_UP, 4) &&
            VerifyField<uint8_t>(verifier, VT_IS_ALIVE, 1) &&
            VerifyField<uint8_t>(verifier, VT_IS_VISIBLE, 1) &&
            VerifyField<int32_t>(verifier, VT_ID, 4) &&
+           VerifyField<int32_t>(verifier, VT_FRAME_NUMBER, 4) &&
            verifier.EndTable();
   }
   EnemyT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -245,17 +252,26 @@ struct EnemyBuilder {
   typedef Enemy Table;
   ::flatbuffers::FlatBufferBuilder &fbb_;
   ::flatbuffers::uoffset_t start_;
-  void add_position(const VS::Schema::Vec3 *position) {
-    fbb_.AddStruct(Enemy::VT_POSITION, position);
+  void add_forward(float forward) {
+    fbb_.AddElement<float>(Enemy::VT_FORWARD, forward, 0.0f);
+  }
+  void add_side(float side) {
+    fbb_.AddElement<float>(Enemy::VT_SIDE, side, 0.0f);
+  }
+  void add_up(float up) {
+    fbb_.AddElement<float>(Enemy::VT_UP, up, 0.0f);
   }
   void add_is_alive(bool is_alive) {
     fbb_.AddElement<uint8_t>(Enemy::VT_IS_ALIVE, static_cast<uint8_t>(is_alive), 0);
   }
   void add_is_visible(bool is_visible) {
-    fbb_.AddElement<uint8_t>(Enemy::VT_IS_VISIBLE, static_cast<uint8_t>(is_visible), 0);
+    fbb_.AddElement<uint8_t>(Enemy::VT_IS_VISIBLE, static_cast<uint8_t>(is_visible), 1);
   }
   void add_id(int32_t id) {
     fbb_.AddElement<int32_t>(Enemy::VT_ID, id, 0);
+  }
+  void add_frame_number(int32_t frame_number) {
+    fbb_.AddElement<int32_t>(Enemy::VT_FRAME_NUMBER, frame_number, 0);
   }
   explicit EnemyBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
@@ -270,13 +286,19 @@ struct EnemyBuilder {
 
 inline ::flatbuffers::Offset<Enemy> CreateEnemy(
     ::flatbuffers::FlatBufferBuilder &_fbb,
-    const VS::Schema::Vec3 *position = nullptr,
+    float forward = 0.0f,
+    float side = 0.0f,
+    float up = 0.0f,
     bool is_alive = false,
-    bool is_visible = false,
-    int32_t id = 0) {
+    bool is_visible = true,
+    int32_t id = 0,
+    int32_t frame_number = 0) {
   EnemyBuilder builder_(_fbb);
+  builder_.add_frame_number(frame_number);
   builder_.add_id(id);
-  builder_.add_position(position);
+  builder_.add_up(up);
+  builder_.add_side(side);
+  builder_.add_forward(forward);
   builder_.add_is_visible(is_visible);
   builder_.add_is_alive(is_alive);
   return builder_.Finish();
@@ -381,27 +403,6 @@ struct GameState::Traits {
 
 ::flatbuffers::Offset<GameState> CreateGameState(::flatbuffers::FlatBufferBuilder &_fbb, const GameStateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
-inline PlayerDataT::PlayerDataT(const PlayerDataT &o)
-      : position((o.position) ? new VS::Schema::Vec3(*o.position) : nullptr),
-        rotation(o.rotation),
-        slash_active(o.slash_active),
-        slash_angle(o.slash_angle),
-        health(o.health),
-        is_visible(o.is_visible),
-        id(o.id) {
-}
-
-inline PlayerDataT &PlayerDataT::operator=(PlayerDataT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(position, o.position);
-  std::swap(rotation, o.rotation);
-  std::swap(slash_active, o.slash_active);
-  std::swap(slash_angle, o.slash_angle);
-  std::swap(health, o.health);
-  std::swap(is_visible, o.is_visible);
-  std::swap(id, o.id);
-  return *this;
-}
-
 inline PlayerDataT *PlayerData::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
   auto _o = std::make_unique<PlayerDataT>();
   UnPackTo(_o.get(), _resolver);
@@ -411,13 +412,16 @@ inline PlayerDataT *PlayerData::UnPack(const ::flatbuffers::resolver_function_t 
 inline void PlayerData::UnPackTo(PlayerDataT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
   (void)_o;
   (void)_resolver;
-  { auto _e = position(); if (_e) _o->position = std::unique_ptr<VS::Schema::Vec3>(new VS::Schema::Vec3(*_e)); }
+  { auto _e = forward(); _o->forward = _e; }
+  { auto _e = side(); _o->side = _e; }
+  { auto _e = up(); _o->up = _e; }
   { auto _e = rotation(); _o->rotation = _e; }
   { auto _e = slash_active(); _o->slash_active = _e; }
   { auto _e = slash_angle(); _o->slash_angle = _e; }
   { auto _e = health(); _o->health = _e; }
   { auto _e = is_visible(); _o->is_visible = _e; }
   { auto _e = id(); _o->id = _e; }
+  { auto _e = frame_number(); _o->frame_number = _e; }
 }
 
 inline ::flatbuffers::Offset<PlayerData> CreatePlayerData(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerDataT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -428,37 +432,28 @@ inline ::flatbuffers::Offset<PlayerData> PlayerData::Pack(::flatbuffers::FlatBuf
   (void)_rehasher;
   (void)_o;
   struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const PlayerDataT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _position = _o->position ? _o->position.get() : nullptr;
+  auto _forward = _o->forward;
+  auto _side = _o->side;
+  auto _up = _o->up;
   auto _rotation = _o->rotation;
   auto _slash_active = _o->slash_active;
   auto _slash_angle = _o->slash_angle;
   auto _health = _o->health;
   auto _is_visible = _o->is_visible;
   auto _id = _o->id;
+  auto _frame_number = _o->frame_number;
   return VS::Schema::CreatePlayerData(
       _fbb,
-      _position,
+      _forward,
+      _side,
+      _up,
       _rotation,
       _slash_active,
       _slash_angle,
       _health,
       _is_visible,
-      _id);
-}
-
-inline EnemyT::EnemyT(const EnemyT &o)
-      : position((o.position) ? new VS::Schema::Vec3(*o.position) : nullptr),
-        is_alive(o.is_alive),
-        is_visible(o.is_visible),
-        id(o.id) {
-}
-
-inline EnemyT &EnemyT::operator=(EnemyT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(position, o.position);
-  std::swap(is_alive, o.is_alive);
-  std::swap(is_visible, o.is_visible);
-  std::swap(id, o.id);
-  return *this;
+      _id,
+      _frame_number);
 }
 
 inline EnemyT *Enemy::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -470,10 +465,13 @@ inline EnemyT *Enemy::UnPack(const ::flatbuffers::resolver_function_t *_resolver
 inline void Enemy::UnPackTo(EnemyT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
   (void)_o;
   (void)_resolver;
-  { auto _e = position(); if (_e) _o->position = std::unique_ptr<VS::Schema::Vec3>(new VS::Schema::Vec3(*_e)); }
+  { auto _e = forward(); _o->forward = _e; }
+  { auto _e = side(); _o->side = _e; }
+  { auto _e = up(); _o->up = _e; }
   { auto _e = is_alive(); _o->is_alive = _e; }
   { auto _e = is_visible(); _o->is_visible = _e; }
   { auto _e = id(); _o->id = _e; }
+  { auto _e = frame_number(); _o->frame_number = _e; }
 }
 
 inline ::flatbuffers::Offset<Enemy> CreateEnemy(::flatbuffers::FlatBufferBuilder &_fbb, const EnemyT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -484,16 +482,22 @@ inline ::flatbuffers::Offset<Enemy> Enemy::Pack(::flatbuffers::FlatBufferBuilder
   (void)_rehasher;
   (void)_o;
   struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const EnemyT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
-  auto _position = _o->position ? _o->position.get() : nullptr;
+  auto _forward = _o->forward;
+  auto _side = _o->side;
+  auto _up = _o->up;
   auto _is_alive = _o->is_alive;
   auto _is_visible = _o->is_visible;
   auto _id = _o->id;
+  auto _frame_number = _o->frame_number;
   return VS::Schema::CreateEnemy(
       _fbb,
-      _position,
+      _forward,
+      _side,
+      _up,
       _is_alive,
       _is_visible,
-      _id);
+      _id,
+      _frame_number);
 }
 
 inline GameStateT *GameState::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {

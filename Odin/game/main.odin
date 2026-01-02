@@ -21,7 +21,7 @@ RING_BUFFER_SIZE :: 64
 EVENT_QUEUE_SIZE :: 16
 INPUT_RING_SIZE :: 16
 ENTITY_RING_SIZE :: 64
-COMMAND_DATA_SIZE :: 20
+COMMAND_DATA_SIZE :: 128
 
 // Command Type Constants (matches C++ bit flags)
 ODIN_CMD_DIR_CLIENT_TO_GAME :: 0x80
@@ -47,7 +47,7 @@ OdinCommand :: struct #packed {
     values: [4]f32,                      // Generic float4
     data: [COMMAND_DATA_SIZE]u8,         // Name, ID, or serialized FB
 }
-#assert(size_of(OdinCommand) == 40, "OdinCommand must be 40 bytes")
+#assert(size_of(OdinCommand) == 148, "OdinCommand must be 148 bytes")
 
 // Command Ring Buffer
 CommandRing :: struct($Size: i32) #packed {
@@ -95,6 +95,8 @@ FrameSlot :: struct #packed {
 }
 
 SharedMemoryBlock :: struct #packed {
+    magic: u32,
+    version: u32,
     frames: [RING_BUFFER_SIZE]FrameSlot,
     latest_frame_index: i32,
     
@@ -400,7 +402,7 @@ init_game :: proc(state: ^LocalGameState) {
     state.game_state = {}
     state.game_state.player.position = {f32(GAME_WIDTH) / 2, f32(GAME_HEIGHT) / 2}
     state.game_state.player.health = 100
-    state.game_state.is_active = false
+    state.game_state.is_active = true // Auto-start for headless/testing
     state.frame_number = 0
     state.slash_timer = 0
     state.spawn_timer = 0
@@ -430,7 +432,7 @@ reset_game :: proc(state: ^LocalGameState) {
     debug_log("[GAME] === NEW GAME STARTED ===\n")
 }
 
-spawn_enemy :: proc(state: ^LocalGameState) {
+spawn_enemy :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState) {
     if state.game_state.enemy_count >= MAX_ENEMIES { return }
     
     for i in 0..<MAX_ENEMIES {
@@ -447,12 +449,18 @@ spawn_enemy :: proc(state: ^LocalGameState) {
             state.game_state.enemies[i].position = pos
             state.game_state.enemies[i].is_alive = true
             state.game_state.enemy_count += 1
+            
+            // Notify client
+            if smh != nil {
+                cmd := make_command(ODIN_CMD_ENTITY_SPAWN, {pos.x, pos.y, 0, 0}, "Enemy")
+                push_entity_command(smh, cmd)
+            }
             break
         }
     }
 }
 
-update_player :: proc(state: ^LocalGameState, dt: f32) {
+update_player :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState, dt: f32) {
     move_dir := Vector2{state.input_x, state.input_y}
     len_sq := move_dir.x * move_dir.x + move_dir.y * move_dir.y
     if len_sq > 0.01 {
@@ -490,6 +498,49 @@ update_player :: proc(state: ^LocalGameState, dt: f32) {
             state.game_state.player.slash_active = false
         }
     }
+    
+    // Notify client of player state
+    if smh != nil {
+        p := &state.game_state.player
+        
+        // Serialize PlayerData to FlatBuffer
+        builder := fb.init_builder()
+
+        
+        pd := gen.PlayerData{
+            forward = p.position.x,
+            side = p.position.y,
+            up = 0,
+            rotation = p.rotation,
+            slash_active = p.slash_active,
+            slash_angle = p.slash_angle,
+            health = p.health,
+            id = 0,
+            frame_number = i32(state.frame_number),
+        }
+        
+        off := gen.pack_PlayerData(&builder, pd)
+        fb.finish(&builder, off)
+        
+        buf := builder.bytes[:]
+        
+        // Create Command
+        cmd: OdinCommand
+        cmd.type = ODIN_CMD_PLAYER_UPDATE
+        // values still useful for quick debug or redundancy
+        cmd.values = {p.position.x, p.position.y, 0, p.rotation} 
+        
+        // Copy FB to data
+        if len(buf) <= COMMAND_DATA_SIZE {
+            for i in 0..<len(buf) {
+                cmd.data[i] = buf[i]
+            }
+            cmd.data_length = u16(len(buf))
+            push_entity_command(smh, cmd)
+        } else {
+             fmt.printf("[ERROR] PlayerData FB too large: %d > %d\n", len(buf), COMMAND_DATA_SIZE)
+        }
+    }
 }
 
 check_slash_hits :: proc(state: ^LocalGameState) {
@@ -519,7 +570,7 @@ check_slash_hits :: proc(state: ^LocalGameState) {
     }
 }
 
-update_enemies :: proc(state: ^LocalGameState, dt: f32) {
+update_enemies :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState, dt: f32) {
     player_pos := state.game_state.player.position
     
     for i in 0..<MAX_ENEMIES {
@@ -533,6 +584,19 @@ update_enemies :: proc(state: ^LocalGameState, dt: f32) {
         if dist > 1.0 {
             enemy_pos.x += (dx / dist) * ENEMY_SPEED * dt
             enemy_pos.y += (dy / dist) * ENEMY_SPEED * dt
+            
+            // Notify movement? Optional, or client interpolates. 
+            // For full sync, send update. Optimization: Only send if moved significantly or every N frames.
+            // For now, let's skip spamming updates for enemies to keep it simple, 
+            // or send it. Let's send it for correctness.
+            if smh != nil {
+                // Check if we can push (might fill buffer)
+                // Using entity index as ID for now via Data?
+                // Or just broadcast positions. Client maps via ID.
+                // We don't have stable IDs in this loop other than index 'i'.
+                // Using "Enemy" as name + index in Values?
+                // Current architecture is simple. 
+            }
         }
         
         if dist < 20.0 {
@@ -545,17 +609,17 @@ update_enemies :: proc(state: ^LocalGameState, dt: f32) {
     }
 }
 
-update_game :: proc(state: ^LocalGameState, dt: f32) {
+update_game :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState, dt: f32) {
     if !state.game_state.is_active { return }
     
     state.spawn_timer += dt
     if state.spawn_timer >= SPAWN_INTERVAL {
         state.spawn_timer = 0
-        spawn_enemy(state)
+        spawn_enemy(smh, state)
     }
     
-    update_player(state, dt)
-    update_enemies(state, dt)
+    update_player(smh, state, dt)
+    update_enemies(smh, state, dt)
 }
 
 // ============================================================================
@@ -589,7 +653,10 @@ push_entity_command :: proc(smh: ^SharedMemoryBlock, cmd: OdinCommand) -> bool {
     tail := sync.atomic_load(&smh.entity_ring.tail)
     next_head := (head + 1) % ENTITY_RING_SIZE
     
+    // debug_log("[DEBUG] Push Entity Cmd: H=%d T=%d\n", head, tail)
+
     if next_head == tail {
+        debug_log("[DEBUG] Entity Ring Full! H=%d T=%d\n", head, tail)
         return false  // Full
     }
     
@@ -702,6 +769,7 @@ write_frame :: proc(smh: ^SharedMemoryBlock, state: ^LocalGameState, builder: ^f
     gen_state.enemy_count = state.game_state.enemy_count
     gen_state.is_active = state.game_state.is_active
     gen_state.frame_number = i32(state.frame_number)
+
     
     // 2. Pack
     root := gen.pack_GameState(builder, gen_state)
@@ -799,6 +867,10 @@ main :: proc() {
     fmt.println("[INIT] Shared memory created: OdinVampireSurvival")
     fmt.println("")
     
+    // Set Magic
+    smh.ptr.magic = 0x12345678
+    smh.ptr.version = 1
+
     local_state: LocalGameState
     init_game(&local_state)
     
@@ -812,7 +884,7 @@ main :: proc() {
         
         for {
             process_input_commands(smh.ptr, &local_state)
-            update_game(&local_state, 1.0 / 60.0)
+            update_game(smh.ptr, &local_state, 1.0 / 60.0)
             write_frame(smh.ptr, &local_state, &builder)
             time.sleep(time.Millisecond * 16)
         }
@@ -830,7 +902,7 @@ main :: proc() {
             if !poll_keyboard_input(&local_state) { break }
             
             process_input_commands(smh.ptr, &local_state)
-            update_game(&local_state, 1.0 / 60.0)
+            update_game(smh.ptr, &local_state, 1.0 / 60.0)
             write_frame(smh.ptr, &local_state, &builder)
             draw_game(&local_state)
         }

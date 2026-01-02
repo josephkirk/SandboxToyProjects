@@ -5,6 +5,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "OdinClientTypes.generated.h"
 
 // Ring Buffer Constants
 #define ODIN_RING_BUFFER_SIZE 64
@@ -31,7 +32,7 @@
 #define ODIN_CMD_PLAYER_ACTION   0x45  // Data: serialized FB (skill/ability)
 #define ODIN_CMD_EVENT_GAMEPLAY  0x46  // Data: cue_name, Values: params
 
-// Unified Command Structure (40 bytes)
+// Unified Command Structure (40 bytes) - Shared Memory Layout (POD)
 #pragma pack(push, 1)
 struct FOdinCommand {
     uint8 Type;                          // Command type (bit flags)
@@ -42,6 +43,36 @@ struct FOdinCommand {
 };
 #pragma pack(pop)
 static_assert(sizeof(FOdinCommand) == 40, "FOdinCommand must be 40 bytes");
+
+// Blueprint-friendly Command Struct
+USTRUCT(BlueprintType)
+struct FBPOdinCommand {
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly, Category = "Odin")
+    uint8 Type = 0;
+
+    UPROPERTY(BlueprintReadOnly, Category = "Odin")
+    int32 DataLength = 0;
+
+    UPROPERTY(BlueprintReadOnly, Category = "Odin")
+    FVector4 Values = FVector4(0,0,0,0);
+
+    UPROPERTY(BlueprintReadOnly, Category = "Odin")
+    FString DataString;
+    
+    // Helper to convert from raw
+    static FBPOdinCommand FromRaw(const FOdinCommand& Raw) {
+        FBPOdinCommand Cmd;
+        Cmd.Type = Raw.Type;
+        Cmd.DataLength = Raw.DataLength;
+        Cmd.Values = FVector4(Raw.Values[0], Raw.Values[1], Raw.Values[2], Raw.Values[3]);
+        if (Raw.DataLength > 0) {
+            Cmd.DataString = FString(UTF8_TO_TCHAR(Raw.Data));
+        }
+        return Cmd;
+    }
+};
 
 // Command Ring Buffer
 #pragma pack(push, 1)
@@ -70,3 +101,13 @@ struct FOdinSharedMemoryBlock {
     TOdinCommandRing<ODIN_INPUT_RING_SIZE> InputRing;   // Client -> Game
     TOdinCommandRing<ODIN_ENTITY_RING_SIZE> EntityRing; // Game -> Client
 };
+
+// Delegates
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOdinCommandDelegate, const FBPOdinCommand&, Command);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOdinEntitySpawnDelegate, const FBPOdinCommand&, Command);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOdinEntityDestroyDelegate, const FBPOdinCommand&, Command);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOdinEntityUpdateDelegate, const FBPOdinCommand&, Command);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOdinPlayerUpdateDelegate, const FBPOdinCommand&, Command);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOdinGameplayEventDelegate, const FBPOdinCommand&, Command);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOdinFrameReceivedDelegate, const int64, FrameNumber);
+

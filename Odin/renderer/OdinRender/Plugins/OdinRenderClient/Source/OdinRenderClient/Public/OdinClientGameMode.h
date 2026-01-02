@@ -9,8 +9,6 @@
 #include "OdinClientGameMode.generated.h"
 
 class UOdinClientSubsystem;
-class UOdinActorPoolComponent;
-class AOdinDataActor;
 class AOdinPlayerState;
 
 UCLASS()
@@ -19,15 +17,18 @@ class ODINRENDERCLIENT_API AOdinClientGameMode : public AGameModeBase {
 
 public:
     AOdinClientGameMode();
+
     virtual void BeginPlay() override;
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+    
+    // ========== Game Lifecycle (Odin) ==========
+    
+    UFUNCTION(BlueprintCallable, Category = "OdinClient|Lifecycle")
+    void StartOdinGame();
 
-    // ========== Actor Pooling ==========
-    
-    // Get the actor pool component
-    UFUNCTION(BlueprintPure, Category = "OdinClient|Pooling")
-    UOdinActorPoolComponent* GetActorPool() const { return ActorPoolComponent; }
-    
+    UFUNCTION(BlueprintCallable, Category = "OdinClient|Lifecycle")
+    void EndOdinGame();
+
     // ========== Player Management ==========
     
     // Spawn the player actor (override in subclass for custom player class)
@@ -43,20 +44,11 @@ public:
     AOdinPlayerState* GetOdinPlayerState() const { return OdinPlayerState; }
 
 protected:
-    // Actor Pool Component
-    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "OdinClient|Pooling")
-    UOdinActorPoolComponent* ActorPoolComponent;
-    
-    UPROPERTY(BlueprintReadOnly, Category = "OdinClient")
-    UOdinClientSubsystem* OdinSubsystem;
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Odin")
+    class UOdinClientActorManagerComponent* ActorManager;
 
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "OdinClient")
     FString SharedMemoryName = TEXT("OdinVampireSurvival");
-
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "OdinClient")
-    float StatePollingInterval = 0.016f;
-
-    float StatePollingTimer = 0.0f;
     
     // The spawned player actor
     UPROPERTY(BlueprintReadOnly, Category = "OdinClient|Player")
@@ -66,9 +58,9 @@ protected:
     UPROPERTY(BlueprintReadOnly, Category = "OdinClient|Player")
     AOdinPlayerState* OdinPlayerState;
 
-    // Virtual function to be implemented by child classes to fetch and process game state
-    virtual void OnUpdateGameState();
-
+    // Helper to get subsystem without storing it
+    UOdinClientSubsystem* GetOdinSubsystem() const;
+    
     UFUNCTION()
     void HandleConnected();
 
@@ -81,10 +73,9 @@ protected:
     UFUNCTION(BlueprintImplementableEvent, Category = "OdinClient")
     void OnOdinDisconnected();
 
-    // Tick for polling
-    virtual void Tick(float DeltaTime) override;
-    
-    // Create and initialize the player state
+    UFUNCTION()
+    void HandlePlayerUpdate(const FBPOdinCommand& Cmd);
+
     virtual void InitializeOdinPlayerState();
 };
 

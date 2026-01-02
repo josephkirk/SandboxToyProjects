@@ -146,9 +146,9 @@ def map_to_ue_type(fbs_type, struct_names, table_names):
         else:
             return f"F{fbs_type}"  # USTRUCT
     
-    # Table -> UObject pointer
+    # Table -> UStruct (previously UObject*)
     if fbs_type in table_names:
-        return f"UOdin{fbs_type}*"
+        return f"F{fbs_type}"
     
     # Enum -> int32
     return "int32"
@@ -169,8 +169,8 @@ def run_flatc(schema_file, output_dir):
     subprocess.check_call(cmd)
 
 
-def gen_ustruct_code(parser, output_dir, api_macro, schema_basename):
-    """Generate USTRUCT wrappers for FlatBuffer structs only."""
+def gen_ustruct_code(parser, output_dir, api_macro, schema_basename, fb_namespace):
+    """Generate USTRUCT wrappers for FlatBuffer structs and tables."""
     header = f"""#pragma once
 #include "CoreMinimal.h"
 #include "{schema_basename}_flatbuffer.h"
@@ -183,8 +183,14 @@ def gen_ustruct_code(parser, output_dir, api_macro, schema_basename):
     struct_names = parser.get_struct_names()
     table_names = parser.get_table_names()
     
+    # helper to check if type is a table
+    def is_table(t): return t in table_names
+
+    # 1. Generate Structs (Value Types)
     for name, fields in parser.structs:
         wrapper_name = f"F{name}"
+        if name == "GameState":
+             wrapper_name = "FVSGameState"
         
         header += f"""USTRUCT(BlueprintType)
 struct {api_macro} {wrapper_name} {{
@@ -193,18 +199,102 @@ struct {api_macro} {wrapper_name} {{
 """
         for fname, ftype in fields:
             ue_type = map_to_ue_type(ftype, struct_names, table_names)
+            if ftype == "GameState": ue_type = "FVSGameState"
+            
             prop_name = fname.title().replace("_", "")
             header += f"    UPROPERTY(BlueprintReadWrite, Category = \"Odin\")\n"
             header += f"    {ue_type} {prop_name};\n\n"
         
         header += "};\n\n"
+
+    # 2. Generate Tables (Reference Types -> USTRUCTs)
+    for name, fields in parser.tables:
+        wrapper_name = f"F{name}"
+        if name == "GameState":
+             wrapper_name = "FVSGameState"
+        
+        header += f"""USTRUCT(BlueprintType)
+struct {api_macro} {wrapper_name} {{
+    GENERATED_BODY()
+
+"""
+        for fname, ftype in fields:
+            ue_type = map_to_ue_type(ftype, struct_names, table_names)
+            if ftype == "GameState": ue_type = "FVSGameState"
+            
+            prop_name = fname.title().replace("_", "")
+            
+            # Arrays of tables -> TArray<FInner>
+            if ftype.startswith("[") and ftype.endswith("]"):
+                inner = ftype[1:-1]
+                if inner in table_names:
+                     inner_type = f"F{inner}"
+                     if inner == "GameState": inner_type = "FVSGameState"
+                     ue_type = f"TArray<{inner_type}>"
+
+            header += f"    UPROPERTY(BlueprintReadWrite, Category = \"Odin\")\n"
+            header += f"    {ue_type} {prop_name};\n\n"
+            
+        # Unpack method
+        header += f"    static {wrapper_name} Unpack(const {fb_namespace}::{name}* InObj);\n"
+        header += "};\n\n"
+        
+        # Implement Unpack
+        cpp += f"""{wrapper_name} {wrapper_name}::Unpack(const {fb_namespace}::{name}* InObj) {{
+    {wrapper_name} Result;
+    if (!InObj) return Result;
+
+"""
+        for fname, ftype in fields:
+            prop_name = fname.title().replace("_", "")
+            
+            if ftype in ["int", "float", "bool", "int32", "float32", "int64", "uint64"]:
+                cpp += f"    Result.{prop_name} = InObj->{fname}();\n"
+            elif ftype in struct_names:
+                 # Struct copy
+                 if "Vec3" in ftype:
+                     cpp += f"    if (InObj->{fname}()) Result.{prop_name} = FVector(InObj->{fname}()->x(), InObj->{fname}()->y(), InObj->{fname}()->z());\n"
+                 elif "Vec2" in ftype:
+                     cpp += f"    if (InObj->{fname}()) Result.{prop_name} = FVector2D(InObj->{fname}()->x(), InObj->{fname}()->y());\n"
+                 else:
+                     # Generic Struct Unpack (manual copy for now or assume same layout?)
+                     # For now, simplistic manual copy if fields match
+                     # TODO: Robust struct unpacking
+                     pass 
+            elif ftype in table_names:
+                # Nested table
+                 inner_type = f"F{ftype}"
+                 if ftype == "GameState": inner_type = "FVSGameState"
+                 cpp += f"    if (InObj->{fname}()) Result.{prop_name} = {inner_type}::Unpack(InObj->{fname}());\n"
+            elif ftype.startswith("["):
+                inner = ftype[1:-1]
+                if inner in table_names:
+                    inner_type = f"F{inner}"
+                    if inner == "GameState": inner_type = "FVSGameState"
+                    # Array of tables
+                    cpp += f"    if (InObj->{fname}()) {{\n"
+                    cpp += f"        Result.{prop_name}.Reserve(InObj->{fname}()->size());\n"
+                    cpp += f"        for (const auto* Item : *InObj->{fname}()) {{\n"
+                    cpp += f"            Result.{prop_name}.Add({inner_type}::Unpack(Item));\n"
+                    cpp += f"        }}\n"
+                    cpp += f"    }}\n"
+                elif inner in struct_names:
+                     # Array of structs
+                     pass 
+                else:
+                    # Array of primitives
+                    # TODO: simple memcopy or loop
+                    pass
+
+        cpp += "    return Result;\n}\n\n"
+
     
     with open(f"{output_dir}/{schema_basename}Structs.h", "w") as f:
         f.write(header)
     with open(f"{output_dir}/{schema_basename}Structs.cpp", "w") as f:
         f.write(cpp)
     
-    print(f"Generated USTRUCTs for {len(parser.structs)} structs.")
+    print(f"Generated USTRUCTs for {len(parser.structs)} structs and {len(parser.tables)} tables.")
 
 
 def gen_uobject_code(parser, output_dir, api_macro, schema_basename, fb_namespace):
@@ -391,6 +481,8 @@ import fb "../flatbuffers"
                 code += f"        for i := len(offsets)-1; i >= 0; i -= 1 {{ fb.prepend_offset(b, offsets[i]) }}\n"
                 code += f"        vec_{fname} = fb.end_vector(b, len(o.{fname}))\n"
                 code += f"    }}\n"
+            elif ftype in parser.get_table_names():
+                code += f"    off_{fname} := pack_{ftype}(b, o.{fname})\n"
         
         code += f"    fb.start_table(b, {len(fields)})\n"
         
@@ -405,6 +497,8 @@ import fb "../flatbuffers"
                 code += f"    fb.prepend_struct_slot(b, {idx}, o.{fname})\n"
             elif ftype.startswith("["):
                 code += f"    if vec_{fname} != 0 {{ fb.prepend_offset_slot(b, {idx}, vec_{fname}) }}\n"
+            elif ftype in parser.get_table_names():
+                code += f"    fb.prepend_offset_slot(b, {idx}, off_{fname})\n"
         
         code += f"    return fb.end_table(b)\n"
         code += "}\n\n"
@@ -435,18 +529,15 @@ def main():
         
         # Validate schema
         if not parser.validate_no_table_refs():
-            print(f"[SKIP] Schema validation failed for {schema_path.name}")
-            continue
+             print(f"[WARN] Schema validation warning for {schema_path.name} (Table referencing Table)")
+             # continue - Allow table refs
         
         # Run flatc for C++ headers
         run_flatc(schema_path, UE_GAME_DIR)
         
         # Generate USTRUCTs (game module)
-        gen_ustruct_code(parser, UE_GAME_DIR, GAME_API, schema_basename)
-        
-        # Generate UObjects + Actors (game module)
         fb_namespace = parser.namespace.replace(".", "::")
-        gen_uobject_code(parser, UE_GAME_DIR, GAME_API, schema_basename, fb_namespace)
+        gen_ustruct_code(parser, UE_GAME_DIR, GAME_API, schema_basename, fb_namespace)
         
         # Generate Odin code
         gen_odin_code(parser, ODIN_OUT_DIR, schema_basename)

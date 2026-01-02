@@ -2,6 +2,8 @@
 // Copyright Nguyen Phi Hung. All Rights Reserved.
 
 #include "OdinClientSubsystem.h"
+#include "Engine/World.h"
+#include "Engine/GameInstance.h"
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -16,6 +18,16 @@ void UOdinClientSubsystem::Initialize(FSubsystemCollectionBase& Collection) {
 void UOdinClientSubsystem::Deinitialize() {
     DisconnectFromOdin();
     Super::Deinitialize();
+}
+
+UOdinClientSubsystem* UOdinClientSubsystem::Get(const UObject* WorldContextObject) {
+    if (!WorldContextObject) return nullptr;
+    
+    UWorld* World = WorldContextObject->GetWorld();
+    if (!World) return nullptr;
+    
+    UGameInstance* GI = World->GetGameInstance();
+    return GI ? GI->GetSubsystem<UOdinClientSubsystem>() : nullptr;
 }
 
 bool UOdinClientSubsystem::ConnectToOdin(FString SharedMemoryName) {
@@ -69,8 +81,57 @@ const FOdinSharedMemoryBlock::FrameSlot* UOdinClientSubsystem::GetLatestFrameSlo
     return &SharedMemory->Frames[LatestIndex];
 }
 
+// Tickable Interface
+void UOdinClientSubsystem::Tick(float DeltaTime) {
+    if (IsConnected()) {
+        ProcessCommandQueue();
+        
+        // Check for new frame
+        if (SharedMemory) {
+            int32 LatestIndex = FPlatformAtomics::AtomicRead(&SharedMemory->LatestFrameIndex);
+            if (LatestIndex != LastBroadcastFrameIndex && LatestIndex >= 0 && LatestIndex < ODIN_RING_BUFFER_SIZE) {
+                LastBroadcastFrameIndex = LatestIndex;
+                const auto& Slot = SharedMemory->Frames[LatestIndex];
+                OnFrameReceived.Broadcast(static_cast<int64>(Slot.FrameNumber));
+            }
+        }
+    }
+}
+
+void UOdinClientSubsystem::ProcessCommandQueue() {
+    FOdinCommand Cmd;
+    // Process up to 10 commands per tick to avoid stalling
+    int32 ProcessCount = 0;
+    while (PopEntityCommand(Cmd) && ProcessCount < 10) {
+        ProcessCount++;
+        
+        FBPOdinCommand BPCmd = FBPOdinCommand::FromRaw(Cmd);
+        
+        switch (Cmd.Type) {
+            case ODIN_CMD_ENTITY_SPAWN:
+                OnEntitySpawn.Broadcast(BPCmd);
+                break;
+            case ODIN_CMD_ENTITY_DESTROY:
+                OnEntityDestroy.Broadcast(BPCmd);
+                break;
+            case ODIN_CMD_ENTITY_UPDATE:
+                OnEntityUpdate.Broadcast(BPCmd);
+                break;
+            case ODIN_CMD_PLAYER_UPDATE:
+                OnPlayerUpdate.Broadcast(BPCmd);
+                break;
+            case ODIN_CMD_EVENT_GAMEPLAY:
+            case ODIN_CMD_PLAYER_ACTION:
+                OnGameplayEvent.Broadcast(BPCmd);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
 // ========================================
-// Command Buffer Implementation
+// Command Buffers
 // ========================================
 
 FOdinCommand UOdinClientSubsystem::MakeCommand(uint8 Type, float V0, float V1, float V2, float V3, const FString& Data) {
