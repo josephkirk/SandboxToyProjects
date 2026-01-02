@@ -15,7 +15,7 @@ test_command_ring_buffer_basic :: proc(t: ^testing.T) {
     it := (^ipc.IPC_Transport)(trans)
     smb := it.block
     
-    cmd_in := ipc.make_command(.Input, ipc.CMD_INPUT_MOVE, {1.0, 2.0, 0}, "TestInput")
+    cmd_in := ipc.make_command(.Input, CMD_INPUT_MOVE, {1.0, 2.0, 0}, "TestInput")
     
     // Simulate Client Pushing
     tail := smb.input_ring.tail 
@@ -32,7 +32,7 @@ test_command_ring_buffer_basic :: proc(t: ^testing.T) {
     testing.expect(t, recv_ok, "Should successfully receive command")
     
     popped := (^ipc.Command)(&buffer[0])
-    testing.expect(t, popped.type == ipc.CMD_INPUT_MOVE, "Command type matches")
+    testing.expect(t, popped.type == CMD_INPUT_MOVE, "Command type matches")
     testing.expect(t, popped.target_pos.x == 1.0, "Target x matches")
     
     data_str := string(popped.data[:popped.data_length])
@@ -53,13 +53,13 @@ test_entity_ring_buffer_wrap :: proc(t: ^testing.T) {
     count := ipc.ENTITY_RING_SIZE - 1
     
     for i in 0..<count {
-        cmd := ipc.make_command(.Action, ipc.CMD_ACTION_SPAWN, {f32(i), 0, 0}, "Entity")
+        cmd := ipc.make_command(.Action, CMD_ENTITY_SPAWN, {f32(i), 0, 0}, "Entity")
         ok := ipc.push_entity_command(trans, cmd)
         testing.expect(t, ok, fmt.tprintf("Push should succeed at index %d", i))
     }
     
     // Next push should fail (Full)
-    fail_cmd := ipc.make_command(.Action, ipc.CMD_ACTION_SPAWN, {999, 0, 0}, "Full")
+    fail_cmd := ipc.make_command(.Action, CMD_ENTITY_SPAWN, {999, 0, 0}, "Full")
     ok_fail := ipc.push_entity_command(trans, fail_cmd)
     testing.expect(t, !ok_fail, "Push should fail when full")
     
@@ -86,14 +86,14 @@ test_shared_memory_layout :: proc(t: ^testing.T) {
 // Test: Frame Size Limit
 @(test)
 test_frame_size_limit :: proc(t: ^testing.T) {
-    gs := ipc.GameState{
+    gs := GameState{
         score = 100000,
         enemy_count = 100,
         is_active = true,
         frame_number = 12345,
     }
     
-    size := size_of(ipc.GameState)
+    size := size_of(GameState)
     fmt.printf("[TEST] GameState raw size: %d bytes (Max Frame Data: %d)\n", size, ipc.MAX_FRAME_SIZE)
     
     testing.expect(t, size < ipc.MAX_FRAME_SIZE, "Frame must fit in Shared Memory")

@@ -21,17 +21,16 @@ import "../session"
 // (Moved to ipc/ipc_transport.odin)
 
 // Command Categories & Types
-Category :: ipc.CommandCategory
-
 // Game -> Client Commands
-CMD_ENTITY_SPAWN   :: ipc.CMD_ACTION_SPAWN
-CMD_ENTITY_DESTROY :: ipc.CMD_ACTION_DESTROY
-CMD_ENTITY_UPDATE  :: ipc.CMD_ACTION_UPDATE
-CMD_PLAYER_UPDATE  :: ipc.CMD_STATE_PLAYER_UPDATE
-CMD_PLAYER_ACTION  :: ipc.CMD_INPUT_ACTION
-CMD_EVENT_GAMEPLAY :: ipc.CMD_EVENT_GAMEPLAY
-CMD_INPUT          :: ipc.CMD_INPUT_MOVE
-CMD_GAME           :: ipc.CMD_GAME_START
+CMD_ENTITY_SPAWN   :: CMD_ACTION_SPAWN
+CMD_ENTITY_DESTROY :: CMD_ACTION_DESTROY
+CMD_ENTITY_UPDATE  :: CMD_ACTION_UPDATE
+CMD_PLAYER_UPDATE  :: CMD_STATE_PLAYER_UPDATE
+CMD_PLAYER_ACTION  :: CMD_INPUT_ACTION
+// CMD_EVENT_GAMEPLAY is defined in game_protocol.odin
+CMD_INPUT          :: CMD_INPUT_MOVE
+CMD_GAME           :: CMD_GAME_START
+
 
 // ============================================================================
 // Game Constants
@@ -47,11 +46,10 @@ SLASH_RANGE :: 80.0
 SPAWN_INTERVAL :: 0.5
 
 // Type Aliases
-Vector2   :: ipc.Vector2
-Player    :: ipc.Player
-Enemy     :: ipc.Enemy
-GameState :: ipc.GameState
-MAX_ENEMIES :: ipc.MAX_ENEMIES
+// Type Aliases
+Category :: ipc.CommandCategory
+// GameState, Player, Enemy are now local in game_protocol.odin
+
 
 // ============================================================================
 // Runtime Config (from CLI)
@@ -380,7 +378,7 @@ update_player :: proc(trans: ^ipc.Transport, state: ^LocalGameState, dt: f32) {
     if trans != nil {
         p := &state.game_state.player
         
-        pd := ipc.PlayerData{
+        pd := PlayerData{
             forward = p.position.x,
             side = p.position.y,
             up = 0,
@@ -395,12 +393,12 @@ update_player :: proc(trans: ^ipc.Transport, state: ^LocalGameState, dt: f32) {
         // Create Command
         cmd: ipc.Command
         cmd.category = .State
-        cmd.type = ipc.CMD_STATE_PLAYER_UPDATE
+        cmd.type = CMD_STATE_PLAYER_UPDATE
         cmd.target_pos = {p.position.x, p.position.y, 0} 
         
         // Copy struct to data
-        mem.copy(&cmd.data[0], &pd, size_of(ipc.PlayerData))
-        cmd.data_length = u16(size_of(ipc.PlayerData))
+        mem.copy(&cmd.data[0], &pd, size_of(PlayerData))
+        cmd.data_length = u16(size_of(PlayerData))
         ipc.push_entity_command(trans, cmd)
     }
 }
@@ -558,7 +556,7 @@ write_frame :: proc(trans: ^ipc.Transport, state: ^LocalGameState) {
     state.game_state.total_kills = state.total_kills
     
     // Copy full GameState to buffer
-    buf := mem.slice_to_bytes([]ipc.GameState{state.game_state})
+    buf := mem.slice_to_bytes([]GameState{state.game_state})
     ipc.ipc_write_frame(trans, buf, state.frame_number)
 }
 
