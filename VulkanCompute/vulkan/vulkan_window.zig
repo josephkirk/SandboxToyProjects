@@ -1554,7 +1554,18 @@ pub const WM_RBUTTONDOWN = 0x0204;
 pub const WM_RBUTTONUP = 0x0205;
 pub const WM_KEYDOWN = 0x0100;
 
+// Global WndProc callback hook for external message handling (e.g., ImGui)
+// Set this before creating the window to receive all Windows messages
+pub var g_wndProcCallback: ?*const fn (os.HWND, os.UINT, os.WPARAM, os.LPARAM) callconv(WINAPI) os.LRESULT = null;
+
 fn wndProc(hWnd: os.HWND, msg: os.UINT, wParam: os.WPARAM, lParam: os.LPARAM) callconv(WINAPI) os.LRESULT {
+    // Call external callback hook if registered (e.g., ImGui's Win32 handler)
+    if (g_wndProcCallback) |callback| {
+        const result = callback(hWnd, msg, wParam, lParam);
+        // If callback handled the message (returned non-zero), don't process further
+        if (result != 0) return result;
+    }
+
     switch (msg) {
         0x0002 => { // WM_DESTROY
             PostQuitMessage(0);
