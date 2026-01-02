@@ -10,7 +10,7 @@ PlayerID :: u32
 EntityID :: u32
 
 // Generic Command Struct
-Command :: struct #packed {
+Command :: struct {
     sequence:      u32,
     tick:          u64,
     player_id:     PlayerID,

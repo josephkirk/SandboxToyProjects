@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    const raylib_path = "../thirdparties/raylib-5.5_win64_msvc16";
+    const raylib_path = "../../../thirdparties/raylib-5.5_win64_msvc16";
     exe.addIncludePath(b.path(std.fmt.allocPrint(b.allocator, "{s}/include", .{raylib_path}) catch unreachable));
     exe.addLibraryPath(b.path(std.fmt.allocPrint(b.allocator, "{s}/lib", .{raylib_path}) catch unreachable));
 

@@ -46,6 +46,13 @@ SLASH_DURATION :: 0.15
 SLASH_RANGE :: 80.0
 SPAWN_INTERVAL :: 0.5
 
+// Type Aliases
+Vector2   :: ipc.Vector2
+Player    :: ipc.Player
+Enemy     :: ipc.Enemy
+GameState :: ipc.GameState
+MAX_ENEMIES :: ipc.MAX_ENEMIES
+
 // ============================================================================
 // Runtime Config (from CLI)
 // ============================================================================
@@ -81,6 +88,7 @@ LocalGameState :: struct {
     registry: ^ipc.CommandRegistry,
     tick_ctrl: ^simulation.TickController,
     sync_strat: ^session.Synchronizer,
+    client_connected: bool,
 }
 
 // (Windows API moved to ipc/ipc_transport.odin)
@@ -321,8 +329,8 @@ spawn_enemy :: proc(trans: ^ipc.Transport, state: ^LocalGameState) {
             
             // Notify client
             if trans != nil {
-                cmd := make_command(.Action, CMD_ENTITY_SPAWN, {pos.x, pos.y, 0}, "Enemy")
-                push_entity_command(trans, cmd)
+                cmd := ipc.make_command(.Action, CMD_ENTITY_SPAWN, {pos.x, pos.y, 0}, "Enemy")
+                ipc.push_entity_command(trans, cmd)
             }
             break
         }
@@ -393,7 +401,7 @@ update_player :: proc(trans: ^ipc.Transport, state: ^LocalGameState, dt: f32) {
         // Copy struct to data
         mem.copy(&cmd.data[0], &pd, size_of(ipc.PlayerData))
         cmd.data_length = u16(size_of(ipc.PlayerData))
-        push_entity_command(trans, cmd)
+        ipc.push_entity_command(trans, cmd)
     }
 }
 
@@ -482,28 +490,7 @@ update_game :: proc(trans: ^ipc.Transport, state: ^LocalGameState, dt: f32) {
 
 // (Moved to ipc package)
 
-// Push an entity command to the ring buffer (Game -> Client)
-push_entity_command :: proc(trans: ^ipc.Transport, cmd: ipc.Command) -> bool {
-    data := mem.slice_to_bytes([]ipc.Command{cmd})
-    return ipc.transport_send(trans, 0, data)
-}
-
-// Helper: Create a command with type and values
-make_command :: proc(category: Category, cmd_type: u16, values: [3]f32 = {}, data_str: string = "") -> ipc.Command {
-    cmd: ipc.Command
-    cmd.category = category
-    cmd.type = cmd_type
-    cmd.target_pos = values
-    
-    // Copy string data
-    data_len := min(len(data_str), ipc.MAX_COMMAND_DATA)
-    for i in 0..<data_len {
-        cmd.data[i] = data_str[i]
-    }
-    cmd.data_length = u16(data_len)
-    
-    return cmd
-}
+// (Moved to ipc package)
 
 // Command Handlers
 handle_input_move :: proc(sim_state: rawptr, cmd: ^ipc.Command) {
@@ -552,6 +539,11 @@ process_input_commands :: proc(trans: ^ipc.Transport, state: ^LocalGameState) {
         
         if !ipc.dispatch_command(state.registry, state, cmd) {
             debug_log("[CMD] No handler for Category:%v Type:%d\n", cmd.category, cmd.type)
+        } else {
+             if !state.client_connected {
+                 state.client_connected = true
+                 fmt.println("[HEADLESS] Client connected! Receiving commands...")
+             }
         }
     }
 }
@@ -562,16 +554,11 @@ process_input_commands :: proc(trans: ^ipc.Transport, state: ^LocalGameState) {
 
 write_frame :: proc(trans: ^ipc.Transport, state: ^LocalGameState) {
     state.frame_number += 1
+    state.game_state.frame_number = i32(state.frame_number)
+    state.game_state.total_kills = state.total_kills
     
-    gs := ipc.GameState{
-        score = state.game_state.score,
-        enemy_count = state.game_state.enemy_count,
-        is_active = state.game_state.is_active,
-        frame_number = i32(state.frame_number),
-    }
-    
-    // Copy struct to bytes for writing
-    buf := mem.slice_to_bytes([]ipc.GameState{gs})
+    // Copy full GameState to buffer
+    buf := mem.slice_to_bytes([]ipc.GameState{state.game_state})
     ipc.ipc_write_frame(trans, buf, state.frame_number)
 }
 
@@ -757,7 +744,7 @@ main :: proc() {
     if g_config.headless {
         // Headless mode - just write frames for Unreal
         fmt.println("[HEADLESS] Running in server mode. Press Ctrl+C to exit.")
-        fmt.println("[HEADLESS] Waiting for events from Unreal client...")
+        fmt.println("[HEADLESS] Waiting for client input...")
         
         for {
             if session.sync_can_advance(local_state.sync_strat, local_state.tick_ctrl.current_tick) {

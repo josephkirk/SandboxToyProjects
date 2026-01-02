@@ -18,8 +18,7 @@ const wchar_t* SHARED_MEMORY_NAME = L"OdinVampireSurvival";
 const int INPUT_RING_SIZE = 16;
 const int ENTITY_RING_SIZE = 64;
 
-// Packed Structs
-#pragma pack(push, 1)
+
 
 enum class CommandCategory : uint16_t {
     None     = 0,
@@ -56,11 +55,46 @@ struct PlayerData {
     int32_t frame_number;
 };
 
+// GameState (Partial definition matching protocol.odin subset used here)
+// Note: This needs to match the new strict alignment if we were reading it directly.
+// But wait, the previous code showed a simplified GameState struct in C++ client!
+// Let's verify if C++ client uses the full GameState or a partial one.
+// The file snippet showed lines 59-63: score, enemy_count, is_active, frame_number.
+// It seems C++ client defined its own struct. If I changed the server to send the Full GameState struct (huge w/ enemies),
+// BUT the C++ client might be reading it via `ipc_recv` or `ipc_read_frame`.
+// In `ipc_transport.odin`, `FrameSlot.data` is bytes.
+// If C++ client casts `FrameSlot.data` to `GameState`, it MUST match.
+// The snippet I saw earlier for C++ (Step 1421) showed a small GameState.
+// If the server now sends a HUGE GameState (100 enemies), the C++ client will read garbage if it expects the old small struct.
+// HOWEVER, looking at `client_sim/main.cpp`, does it iterate frames?
+// Probably. I need to update it to the FULL definition or at least padding compatible.
+// Actually, C++ client simulation logic might be simple and not use enemies array.
+// But strict binary compatibility means I should update it to match the layout even if unused fields exist.
+
+struct Vector2 { float x, y; };
+struct Player {
+    Vector2 position;
+    float rotation;
+    bool  slash_active;
+    float slash_angle;
+    int32_t health;
+    uint8_t _padding[3];
+};
+struct Enemy {
+    Vector2 position;
+    bool    is_alive;
+    uint8_t _padding[3];
+};
+
 struct GameState {
-    int32_t score;
+    Player  player;
+    Enemy   enemies[100];
     int32_t enemy_count;
-    bool    is_active;
+    int32_t score;
+    int32_t total_kills;
     int32_t frame_number;
+    bool    is_active;
+    uint8_t _padding[3];
 };
 
 template <int Size>
@@ -86,7 +120,7 @@ struct SharedMemoryBlock {
     CommandRing<ENTITY_RING_SIZE> entity_ring;
 };
 
-#pragma pack(pop)
+
 
 // Command Types (Categorized)
 const uint16_t CMD_GAME_START = 0x81;

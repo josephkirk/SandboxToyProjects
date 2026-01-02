@@ -33,7 +33,7 @@ pub const Command = extern struct {
     tick: u64,
     player_id: u32,
     category: CommandCategory,
-    command_type: u16,
+    type: u16,
     flags: u16,
     target_entity: u32,
     target_pos: [3]f32,
@@ -65,6 +65,39 @@ pub const SharedMemoryBlock = extern struct {
     entity_ring: CommandRing(ENTITY_RING_SIZE),
 };
 
+pub const MAX_ENEMIES = 100;
+
+pub const Vector2 = extern struct {
+    x: f32,
+    y: f32,
+};
+
+pub const Player = extern struct {
+    position: Vector2,
+    rotation: f32,
+    slash_active: bool,
+    slash_angle: f32,
+    health: i32,
+    _padding: [3]u8,
+};
+
+pub const Enemy = extern struct {
+    position: Vector2,
+    is_alive: bool,
+    _padding: [3]u8,
+};
+
+pub const GameState = extern struct {
+    player: Player,
+    enemies: [MAX_ENEMIES]Enemy,
+    enemy_count: i32,
+    score: i32,
+    total_kills: i32,
+    frame_number: i32,
+    is_active: bool,
+    _padding: [3]u8,
+};
+
 pub const PlayerData = extern struct {
     forward: f32,
     side: f32,
@@ -77,7 +110,7 @@ pub const PlayerData = extern struct {
     frame_number: i32,
 };
 
-pub const GameState = extern struct {
+pub const GameStateSummary = extern struct {
     score: i32,
     enemy_count: i32,
     is_active: bool,

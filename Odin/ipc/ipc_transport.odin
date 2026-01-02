@@ -19,13 +19,13 @@ MAX_FRAME_SIZE :: 16 * 1024
 // (OdinCommand removed, using Command from commands.odin)
 
 // Ring Buffer for Commands
-CommandRing :: struct($Size: int) #packed {
+CommandRing :: struct($Size: int) {
     head:      i32,
     tail:      i32,
     commands:  [Size]Command,
 }
 
-FrameSlot :: struct #packed {
+FrameSlot :: struct {
     frame_number: u64,
     timestamp: f64,
     data_size: u32,
@@ -33,7 +33,7 @@ FrameSlot :: struct #packed {
 }
 
 // Memory Layout for Shared Memory
-SharedMemoryBlock :: struct #packed {
+SharedMemoryBlock :: struct {
     magic:               u32,
     version:             u32,
     frames:              [RING_BUFFER_SIZE]FrameSlot,

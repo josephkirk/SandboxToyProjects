@@ -45,7 +45,40 @@ CMD_EVENT_GAMEPLAY :: 0x01
 // Protocol Structures (Shared between Odin/Zig/C++)
 // ============================================================================
 
-PlayerData :: struct #packed {
+MAX_ENEMIES :: 100
+
+Vector2 :: struct {
+    x: f32,
+    y: f32,
+}
+
+Player :: struct {
+    position:     Vector2,
+    rotation:     f32,
+    slash_active: bool,
+    slash_angle:  f32,
+    health:       i32,
+    _padding:     [3]u8,
+}
+
+Enemy :: struct {
+    position: Vector2,
+    is_alive: bool,
+    _padding: [3]u8,
+}
+
+GameState :: struct {
+    player:      Player,
+    enemies:     [MAX_ENEMIES]Enemy,
+    enemy_count: i32,
+    score:       i32,
+    total_kills: i32,
+    frame_number: i32,
+    is_active:   bool,
+    _padding:    [3]u8,
+}
+
+PlayerData :: struct {
     forward: f32,
     side: f32,
     up: f32,
@@ -57,7 +90,8 @@ PlayerData :: struct #packed {
     frame_number: i32,
 }
 
-GameState :: struct #packed {
+// Summary data for legacy/minimal updates
+GameStateSummary :: struct {
     score: i32,
     enemy_count: i32,
     is_active: bool,
