@@ -1279,6 +1279,128 @@ pub const WindowContext = struct {
         _ = c.vkDeviceWaitIdle(self.device);
     }
 
+    /// Recreates the swapchain after a window resize.
+    /// Must be called when SwapchainOutOfDate error is returned.
+    pub fn recreateSwapchain(self: *WindowContext) !void {
+        // Wait for GPU to finish all operations
+        _ = c.vkDeviceWaitIdle(self.device);
+
+        // Query new surface capabilities (contains current window size)
+        var caps: c.VkSurfaceCapabilitiesKHR = undefined;
+        _ = c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(self.physical_device, self.surface, &caps);
+
+        // Get new dimensions from surface caps
+        var extent = caps.currentExtent;
+
+        // Skip recreation if window is minimized (0 size)
+        if (extent.width == 0 or extent.height == 0) {
+            return;
+        }
+
+        // Destroy old framebuffers
+        for (self.framebuffers) |fb| {
+            c.vkDestroyFramebuffer(self.device, fb, null);
+        }
+
+        // Destroy old image views
+        for (self.swapchain_image_views) |view| {
+            c.vkDestroyImageView(self.device, view, null);
+        }
+
+        // Store old swapchain for recreation
+        const old_swapchain = self.swapchain;
+
+        // Handle special case where extent indicates to use window size
+        if (extent.width == std.math.maxInt(u32)) {
+            extent.width = @max(caps.minImageExtent.width, @min(caps.maxImageExtent.width, extent.width));
+            extent.height = @max(caps.minImageExtent.height, @min(caps.maxImageExtent.height, extent.height));
+        }
+
+        var image_count: u32 = @intCast(self.swapchain_images.len);
+
+        // Create new swapchain using old one as reference
+        const swapchain_create_info = c.VkSwapchainCreateInfoKHR{
+            .sType = c.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+            .pNext = null,
+            .flags = 0,
+            .surface = self.surface,
+            .minImageCount = image_count,
+            .imageFormat = c.VK_FORMAT_B8G8R8A8_SRGB,
+            .imageColorSpace = c.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+            .imageExtent = extent,
+            .imageArrayLayers = 1,
+            .imageUsage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            .imageSharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = null,
+            .preTransform = caps.currentTransform,
+            .compositeAlpha = c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+            .presentMode = c.VK_PRESENT_MODE_IMMEDIATE_KHR,
+            .clipped = c.VK_TRUE,
+            .oldSwapchain = old_swapchain,
+        };
+
+        if (c.vkCreateSwapchainKHR(self.device, &swapchain_create_info, null, &self.swapchain) != c.VK_SUCCESS) {
+            return error.VulkanSwapchainCreationFailed;
+        }
+
+        // Destroy old swapchain
+        c.vkDestroySwapchainKHR(self.device, old_swapchain, null);
+
+        // Get new swapchain images
+        _ = c.vkGetSwapchainImagesKHR(self.device, self.swapchain, &image_count, self.swapchain_images.ptr);
+
+        // Recreate image views
+        for (self.swapchain_images, 0..) |img, i| {
+            const view_info = c.VkImageViewCreateInfo{
+                .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                .pNext = null,
+                .flags = 0,
+                .image = img,
+                .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+                .format = c.VK_FORMAT_B8G8R8A8_SRGB,
+                .components = c.VkComponentMapping{
+                    .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                },
+                .subresourceRange = c.VkImageSubresourceRange{
+                    .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            };
+            if (c.vkCreateImageView(self.device, &view_info, null, &self.swapchain_image_views[i]) != c.VK_SUCCESS) {
+                return error.VulkanImageViewCreationFailed;
+            }
+        }
+
+        // Recreate framebuffers
+        for (self.swapchain_image_views, 0..) |view, i| {
+            const framebuffer_info = c.VkFramebufferCreateInfo{
+                .sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                .pNext = null,
+                .flags = 0,
+                .renderPass = self.render_pass,
+                .attachmentCount = 1,
+                .pAttachments = &view,
+                .width = extent.width,
+                .height = extent.height,
+                .layers = 1,
+            };
+            if (c.vkCreateFramebuffer(self.device, &framebuffer_info, null, &self.framebuffers[i]) != c.VK_SUCCESS) {
+                return error.VulkanFramebufferCreationFailed;
+            }
+        }
+
+        // Update dimensions
+        self.width = extent.width;
+        self.height = extent.height;
+    }
+
     /// Returns the current swapchain image handle for the frame being rendered.
     pub fn getCurrentSwapchainImage(self: *WindowContext) c.VkImage {
         return self.swapchain_images[self.current_image_index];

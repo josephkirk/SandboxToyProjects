@@ -463,7 +463,18 @@ fn run_app() !void {
     }
 
     while (ctx.update()) {
-        const cmdbuf = try ctx.beginFrame();
+        // Handle resize: skip frame if swapchain is out of date
+        const cmdbuf = ctx.beginFrame() catch |err| {
+            if (err == error.SwapchainOutOfDate) {
+                // Window was resized - recreate swapchain and skip this frame
+                ctx.recreateSwapchain() catch |recreate_err| {
+                    std.debug.print("Failed to recreate swapchain: {}\\n", .{recreate_err});
+                    return recreate_err;
+                };
+                continue;
+            }
+            return err;
+        };
 
         // Input Handling
         const mx = ctx.mouse_x;
@@ -700,7 +711,17 @@ fn run_app() !void {
 
         // Final transition to present is handled by render pass finalLayout
 
-        try ctx.endFrame();
+        // Handle resize on frame end as well
+        ctx.endFrame() catch |err| {
+            if (err == error.SwapchainOutOfDate) {
+                ctx.recreateSwapchain() catch |recreate_err| {
+                    std.debug.print("Failed to recreate swapchain on present: {}\\n", .{recreate_err});
+                    return recreate_err;
+                };
+                continue;
+            }
+            return err;
+        };
         frame_count += 1;
     }
 
