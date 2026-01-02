@@ -256,6 +256,9 @@ fn run_app() !void {
         }
     }
 
+    // Register ImGui WndProc callback to forward Win32 messages to ImGui
+    vk_win.g_wndProcCallback = imgui.imguiWndProcHandler;
+
     // Initialize ImGui
     var imgui_backend = try imgui.ImGuiBackend.init(
         @ptrCast(ctx.hwnd),
@@ -457,8 +460,11 @@ fn run_app() !void {
         const mx = ctx.mouse_x;
         const my = ctx.mouse_y;
 
+        // Skip drawing input if ImGui wants the mouse (mouse is over ImGui window)
+        const imgui_wants_mouse = imgui.wantCaptureMouse();
+
         // Left Click: Add Light
-        if (ctx.mouse_left) {
+        if (ctx.mouse_left and !imgui_wants_mouse) {
             const dx = mx - last_mouse_x;
             const dy = my - last_mouse_y;
             const dist_sq = dx * dx + dy * dy;
@@ -476,7 +482,7 @@ fn run_app() !void {
                     last_mouse_y = my;
                 }
             }
-        } else if (ctx.mouse_right) {
+        } else if (ctx.mouse_right and !imgui_wants_mouse) {
             // Right Click: Add Wall
             const dx = mx - last_mouse_x;
             const dy = my - last_mouse_y;

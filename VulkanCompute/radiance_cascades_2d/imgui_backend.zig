@@ -4,6 +4,9 @@
 const std = @import("std");
 
 pub const c = @cImport({
+    @cDefine("WIN32_LEAN_AND_MEAN", "1");
+    @cInclude("windows.h");
+    @cDefine("IMGUI_BACKEND_HAS_WINDOWS_H", "1");
     @cInclude("dcimgui.h");
     @cInclude("backends/dcimgui_impl_vulkan.h");
     @cInclude("backends/dcimgui_impl_win32.h");
@@ -16,6 +19,15 @@ fn vulkanLoader(name: [*c]const u8, user_data: ?*anyopaque) callconv(.c) ?*const
     // Cast to vk.c's VkInstance type (different cimport)
     const instance: vk.c.VkInstance = @ptrCast(user_data);
     return vk.c.vkGetInstanceProcAddr(instance, name);
+}
+
+// Win32 WndProc handler for ImGui - forwards messages to ImGui's Win32 backend
+// Returns non-zero if ImGui handled the message
+pub fn imguiWndProcHandler(hWnd: vk.os.HWND, msg: vk.os.UINT, wParam: vk.os.WPARAM, lParam: vk.os.LPARAM) callconv(vk.WINAPI) vk.os.LRESULT {
+    // Call ImGui's Win32 message handler - cast HWND to cimgui's HWND type
+    const hwnd_ptr: c.HWND = @ptrCast(@alignCast(hWnd));
+    const result = c.cImGui_ImplWin32_WndProcHandler(hwnd_ptr, msg, wParam, lParam);
+    return if (result != 0) result else 0;
 }
 
 pub const ImGuiBackend = struct {
@@ -122,4 +134,15 @@ pub fn button(label: [*:0]const u8) bool {
 
 pub fn sameLine() void {
     c.ImGui_SameLine();
+}
+
+// Input state helpers
+pub fn wantCaptureMouse() bool {
+    const io = c.ImGui_GetIO();
+    return io.*.WantCaptureMouse;
+}
+
+pub fn wantCaptureKeyboard() bool {
+    const io = c.ImGui_GetIO();
+    return io.*.WantCaptureKeyboard;
 }
