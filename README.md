@@ -27,5 +27,14 @@ All Vulkan codes is verbally commented for learning purposes. The project demons
 
 
 
+### [Odin Game Server](./Odin)
+A "Vampire Survival" style rogue-like game engine built to experiment with decoupling simulation from visualization as two independent processes. Both for learning Odin Programming and network programming.
+- **Server**: Written in pure **Odin**, capable of running in Headless mode (sim only) or Debug mode (with Raylib).
+- **Client**: High-performance visualizer written in **Zig** and **Raylib** sending input to Server.
+- **Architecture**: Uses **Shared Memory IPC** with raw struct passing for ultra-low latency communication between the independent Server process and Client process. The protocol is genre-agnostic and generic, capable of supporting various game types.
+
+![serverclient](docs/serverclient.gif)
+
+
 ## Author
 Nguyen Phi Hung
