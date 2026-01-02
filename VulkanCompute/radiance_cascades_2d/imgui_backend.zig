@@ -24,9 +24,10 @@ fn vulkanLoader(name: [*c]const u8, user_data: ?*anyopaque) callconv(.c) ?*const
 // Win32 WndProc handler for ImGui - forwards messages to ImGui's Win32 backend
 // Returns non-zero if ImGui handled the message
 pub fn imguiWndProcHandler(hWnd: vk.os.HWND, msg: vk.os.UINT, wParam: vk.os.WPARAM, lParam: vk.os.LPARAM) callconv(vk.WINAPI) vk.os.LRESULT {
-    // Call ImGui's Win32 message handler - cast HWND to cimgui's HWND type
-    const hwnd_ptr: c.HWND = @ptrCast(@alignCast(hWnd));
-    const result = c.cImGui_ImplWin32_WndProcHandler(hwnd_ptr, msg, wParam, lParam);
+    // Convert HWND between incompatible cImport types via integer
+    const hwnd_int = @intFromPtr(hWnd);
+    const hwnd_c: c.HWND = @ptrFromInt(hwnd_int);
+    const result = c.cImGui_ImplWin32_WndProcHandler(hwnd_c, msg, wParam, lParam);
     return if (result != 0) result else 0;
 }
 
@@ -105,7 +106,11 @@ pub fn sliderFloat(label: [*:0]const u8, value: *f32, min: f32, max: f32) bool {
 }
 
 pub fn sliderInt(label: [*:0]const u8, value: *i32, min: i32, max: i32) bool {
-    return c.ImGui_SliderInt(label, value, min, max);
+    // C API expects c_int pointer - use local variable and copy back
+    var c_val: c_int = @intCast(value.*);
+    const result = c.ImGui_SliderInt(label, &c_val, @intCast(min), @intCast(max));
+    value.* = @intCast(c_val);
+    return result;
 }
 
 pub fn colorEdit3(label: [*:0]const u8, col: *[3]f32) bool {
@@ -113,7 +118,11 @@ pub fn colorEdit3(label: [*:0]const u8, col: *[3]f32) bool {
 }
 
 pub fn checkbox(label: [*:0]const u8, value: *bool) bool {
-    return c.ImGui_Checkbox(label, value);
+    // C API expects bool pointer - convert Zig bool
+    var c_val: bool = value.*;
+    const result = c.ImGui_Checkbox(label, &c_val);
+    value.* = c_val;
+    return result;
 }
 
 pub fn text(fmt: [*:0]const u8) void {

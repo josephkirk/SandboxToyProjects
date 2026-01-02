@@ -25,8 +25,8 @@ struct PushConstants {
     int obstacleCount;
     float time;
     int showIntervals;
-    int padding0;
-    float2 resolution; // Screen resolution
+    int stochasticMode;   // 0 = deterministic dither, 1 = stochastic noise
+    float2 resolution;    // Screen resolution
 };
 
 [[vk::push_constant]] PushConstants pc;
@@ -130,7 +130,8 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     float2 uv = (float2(DTid.xy) + 0.5) / float2(dim.x, dim.y);
     float2 worldPos = uv * pc.resolution;
     
-    // Direct lighting with wall occlusion
+    // Direct lighting with wall occlusion (Level 0 only)
+    // Level 0 computes direct lighting, higher levels compute GI bounces
     if (pc.level == 0) {
         float3 radiance = float3(0.0, 0.0, 0.0);
         
@@ -170,6 +171,11 @@ void main(uint3 DTid : SV_DispatchThreadID) {
             }
         }
         
+        // Merge Upper Cascade GI into level 0 output
+        // This brings the indirect lighting from higher cascade levels into the final image
+        float3 gi = UpperCascade.SampleLevel(LinearSampler, uv, 0).rgb;
+        radiance += gi;
+        
         Output[DTid.xy] = float4(radiance, 1.0);
         return;
     }
@@ -192,7 +198,16 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     float rayCountF = float(pc.baseRays) * pow(2.0, float(pc.level));
     int rayCount = int(rayCountF);
     
-    float noise = gold_noise(DTid.xy, pc.time + float(pc.level) * 13.0);
+    // Noise for ray angle jitter
+    float noise;
+    if (pc.stochasticMode != 0) {
+        // Stochastic: temporal noise for smooth accumulation
+        noise = gold_noise(DTid.xy, pc.time + float(pc.level) * 13.0);
+    } else {
+        // Deterministic: Bayer-like dither pattern (stable, no accumulation needed)
+        float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
+        noise = frac(magic.z * frac(dot(float2(DTid.xy), magic.xy)));
+    }
     
     float angleStep = 6.28318 / float(rayCount);
     float3 radiance = float3(0.0, 0.0, 0.0);

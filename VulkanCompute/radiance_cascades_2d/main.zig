@@ -33,7 +33,7 @@ const PushConstants = extern struct {
     obstacleCount: i32,
     time: f32,
     showIntervals: i32,
-    padding0: i32,
+    stochasticMode: i32, // 0 = deterministic dither, 1 = stochastic noise
     resolution: [2]f32,
 };
 
@@ -306,6 +306,12 @@ fn run_app() !void {
     var last_mouse_y: i32 = -1;
     var brush_radius: f32 = 25.0;
 
+    // Shader Control State (exposed via ImGui)
+    var stochastic_mode: bool = true;
+    var blend_speed: f32 = 0.1;
+    var base_rays: i32 = 4;
+    var show_intervals: bool = false;
+
     // Color palette (indexed by 1-9 keys)
     const colors = [_][3]f32{
         .{ 1.0, 1.0, 1.0 }, // 1: White
@@ -574,11 +580,11 @@ fn run_app() !void {
                 .level = i,
                 .maxLevel = maxLevel,
                 .time = elapsed,
-                .baseRays = 4, // Fixed for now
+                .baseRays = base_rays,
                 .lightCount = lightCount,
                 .obstacleCount = obstacleCount,
-                .showIntervals = 0,
-                .padding0 = 0,
+                .showIntervals = if (show_intervals) 1 else 0,
+                .stochasticMode = if (stochastic_mode) 1 else 0,
             };
 
             ctx.bindComputePipeline(cmdbuf, cascade_pipe);
@@ -603,7 +609,9 @@ fn run_app() !void {
 
         ctx.bindComputePipeline(cmdbuf, accum_pipe);
         ctx.bindDescriptorSet(cmdbuf, c.VK_PIPELINE_BIND_POINT_COMPUTE, accum_layout, activeAccumSet);
-        const ac = AccumConstants{ .blend = 0.1 }; // 10% new, 90% history
+        // Blend speed: in stochastic mode use slider value, otherwise instant (1.0)
+        const effective_blend = if (stochastic_mode) blend_speed else 1.0;
+        const ac = AccumConstants{ .blend = effective_blend };
         ctx.pushConstants(cmdbuf, accum_layout, c.VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(AccumConstants), &ac);
 
         ctx.dispatchCompute(cmdbuf, (ctx.width + 15) / 16, (ctx.height + 15) / 16, 1);
@@ -653,11 +661,18 @@ fn run_app() !void {
 
         // Debug UI Window
         if (imgui.begin("Radiance Cascades Debug")) {
-            imgui.text("Controls:");
+            imgui.text("Drawing:");
             _ = imgui.sliderFloat("Brush Size", &brush_radius, 5.0, 100.0);
+            imgui.text("Colors (press 1-9 keys)");
 
-            imgui.text("Colors (press 1-9 keys):");
+            imgui.text("");
+            imgui.text("Rendering:");
+            _ = imgui.checkbox("Stochastic Mode", &stochastic_mode);
+            _ = imgui.sliderFloat("Blend Speed", &blend_speed, 0.01, 1.0);
+            _ = imgui.sliderInt("Base Rays", &base_rays, 1, 8);
+            _ = imgui.checkbox("Show Intervals", &show_intervals);
 
+            imgui.text("");
             if (imgui.button("Clear Scene")) {
                 lightCount = 0;
                 obstacleCount = 0;
