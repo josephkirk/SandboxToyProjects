@@ -35,6 +35,8 @@ const PushConstants = extern struct {
     showIntervals: i32,
     stochasticMode: i32, // 0 = deterministic dither, 1 = stochastic noise
     resolution: [2]f32,
+    blendRadius: f32, // Metaball blend radius for smooth walls
+    padding1: f32 = 0.0,
 };
 
 const AccumConstants = extern struct {
@@ -311,6 +313,7 @@ fn run_app() !void {
     var blend_speed: f32 = 0.1;
     var base_rays: i32 = 4;
     var show_intervals: bool = false;
+    var blend_radius: f32 = 30.0; // Metaball blend radius
 
     // Color palette (indexed by 1-9 keys)
     const colors = [_][3]f32{
@@ -499,7 +502,7 @@ fn run_app() !void {
                     obstacleSlice[@intCast(obstacleCount)] = Obstacle{
                         .pos = .{ @as(f32, @floatFromInt(mx)), @as(f32, @floatFromInt(my)) },
                         .radius = brush_radius,
-                        .color = .{ 0.1, 0.1, 0.1 }, // Dark walls
+                        .color = colors[current_color_idx], // Use selected color
                     };
                     obstacleCount += 1;
                     std.debug.print("Added wall {d} at ({d}, {d})\n", .{ obstacleCount, mx, my });
@@ -585,6 +588,7 @@ fn run_app() !void {
                 .obstacleCount = obstacleCount,
                 .showIntervals = if (show_intervals) 1 else 0,
                 .stochasticMode = if (stochastic_mode) 1 else 0,
+                .blendRadius = blend_radius,
             };
 
             ctx.bindComputePipeline(cmdbuf, cascade_pipe);
@@ -671,6 +675,7 @@ fn run_app() !void {
             _ = imgui.sliderFloat("Blend Speed", &blend_speed, 0.01, 1.0);
             _ = imgui.sliderInt("Base Rays", &base_rays, 1, 8);
             _ = imgui.checkbox("Show Intervals", &show_intervals);
+            _ = imgui.sliderFloat("GI Smoothness", &blend_radius, 1.0, 100.0);
 
             imgui.text("");
             if (imgui.button("Clear Scene")) {

@@ -27,6 +27,8 @@ struct PushConstants {
     int showIntervals;
     int stochasticMode;   // 0 = deterministic dither, 1 = stochastic noise
     float2 resolution;    // Screen resolution
+    float blendRadius;    // Metaball blend radius for smooth walls
+    float padding1;       // Alignment padding
 };
 
 [[vk::push_constant]] PushConstants pc;
@@ -45,13 +47,32 @@ float sdBox(float2 p, float2 b) {
     return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
 }
 
+// Polynomial smooth minimum for metaball-like blending
+float smin(float a, float b, float k) {
+    float h = max(k - abs(a - b), 0.0) / k;
+    return min(a, b) - h * h * k * 0.25;
+}
+
 float map(float2 p) {
     // Screen is 0..res. 
-    // Box SDF inverted for room boundaries? 
-    // The JS uses center-based coords for box.
+    // Box SDF inverted for room boundaries
     float2 center = pc.resolution * 0.5;
     float d = -sdBox(p - center, center - 2.0);
 
+    // Smooth blend obstacles together using smin (metaball effect for GI)
+    for(int i = 0; i < pc.obstacleCount; i++) {
+        Obstacle obs = ObstacleBuffer[i];
+        float obsDist = sdCircle(p - obs.pos, obs.radius);
+        d = smin(d, obsDist, pc.blendRadius);
+    }
+    return d;
+}
+
+// Sharp SDF for wall material rendering (no smin blending)
+float mapSharp(float2 p) {
+    float2 center = pc.resolution * 0.5;
+    float d = -sdBox(p - center, center - 2.0);
+    
     for(int i = 0; i < pc.obstacleCount; i++) {
         Obstacle obs = ObstacleBuffer[i];
         d = min(d, sdCircle(p - obs.pos, obs.radius));
@@ -176,6 +197,30 @@ void main(uint3 DTid : SV_DispatchThreadID) {
         float3 gi = UpperCascade.SampleLevel(LinearSampler, uv, 0).rgb;
         radiance += gi;
         
+        // Wall material rendering (check if pixel is inside a wall)
+        float minDist = 9999.0;
+        int hitID = -1;
+        for(int i = 0; i < pc.obstacleCount; i++) {
+            Obstacle obs = ObstacleBuffer[i];
+            float d = length(worldPos - obs.pos) - obs.radius;
+            if(d < minDist) {
+                minDist = d;
+                hitID = i;
+            }
+        }
+        
+        // Apply wall color with smooth edges
+        float edgeWidth = 3.0;
+        float edgeFactor = 1.0 - smoothstep(-edgeWidth, edgeWidth, minDist);
+        if(edgeFactor > 0.0 && hitID != -1) {
+            Obstacle obs = ObstacleBuffer[hitID];
+            float3 albedo = obs.color;
+            
+            // Wall gets ambient from surrounding light + base color visibility
+            float3 wallColor = albedo * 0.2 + radiance * albedo * 0.5;
+            radiance = lerp(radiance, wallColor, edgeFactor);
+        }
+        
         Output[DTid.xy] = float4(radiance, 1.0);
         return;
     }
@@ -257,61 +302,66 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     
     // --- WALL MATERIAL & PBR (Only Level 0 - Immediate Hit) ---
     if(pc.level == 0) {
+        float minDist = 9999.0;
         int hitID = -1;
+        
+        // Find closest obstacle using SDF
         for(int i = 0; i < pc.obstacleCount; i++) {
-             Obstacle obs = ObstacleBuffer[i];
-             float d = length(worldPos - obs.pos) - obs.radius;
-             if(d < 0.0) {
-                 hitID = i;
-                 break; 
-             }
+            Obstacle obs = ObstacleBuffer[i];
+            float d = length(worldPos - obs.pos) - obs.radius;
+            if(d < minDist) {
+                minDist = d;
+                hitID = i;
+            }
         }
         
-        if(hitID != -1) {
+        // Smooth edge anti-aliasing using SDF distance
+        // Edge width in pixels (adjust for smoother/sharper edges)
+        float edgeWidth = 2.0;
+        float edgeFactor = 1.0 - smoothstep(-edgeWidth, edgeWidth, minDist);
+        
+        if(edgeFactor > 0.0 && hitID != -1) {
             Obstacle obs = ObstacleBuffer[hitID];
             float3 albedo = obs.color;
             
-            float roughness = 0.5;
-            float metallic = 0.0;
-            float3 F0 = float3(0.04, 0.04, 0.04); 
-            F0 = lerp(F0, albedo, metallic);
-
+            // Simple PBR-like shading
+            float roughness = 0.6;
             float2 centerDir = normalize(worldPos - obs.pos);
-            float3 N = normalize(float3(centerDir, 0.5));
-            float3 V = float3(0.0, 0.0, 1.0); 
-
+            float3 N = normalize(float3(centerDir, 0.4));  // Surface normal
+            float3 V = float3(0.0, 0.0, 1.0);  // View direction (top-down)
+            
             float3 Lo = float3(0.0, 0.0, 0.0);
-
+            
+            // Direct lighting on wall with PBR
             for(int l = 0; l < pc.lightCount; l++) {
                 Light light = LightBuffer[l];
-                float3 lPos = float3(light.pos, 50.0);
+                float3 lPos = float3(light.pos, 40.0);
                 float3 pixelPos3D = float3(worldPos, 0.0);
                 
                 float3 L_vec = lPos - pixelPos3D;
                 float distance = length(L_vec);
                 float3 L = normalize(L_vec);
                 float3 H = normalize(V + L);
-
-                float attenuation = 1.0 / (1.0 + distance * distance * 0.0005);
-                float3 radianceIn = light.color * 2.0 * attenuation;
-
-                float NDF = DistributionGGX(N, H, roughness);
-                float G = GeometrySmith(N, V, L, roughness);
-                float3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
-
-                float3 numerator = NDF * G * F;
-                float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
-                float3 specular = numerator / denominator;
-
-                float3 kS = F;
-                float3 kD = float3(1.0, 1.0, 1.0) - kS;
-                kD *= 1.0 - metallic;
-
+                
+                float attenuation = 1.0 / (1.0 + distance * distance * 0.0003);
+                float3 radianceIn = light.color * 2.5 * attenuation;
+                
+                // Simplified Cook-Torrance
                 float NdotL = max(dot(N, L), 0.0);
-                Lo += (kD * albedo / PI + specular) * radianceIn * NdotL;
+                float NdotH = max(dot(N, H), 0.0);
+                
+                // Diffuse + simple specular
+                float spec = pow(NdotH, (1.0 - roughness) * 64.0);
+                Lo += (albedo * 0.7 + spec * 0.3) * radianceIn * NdotL;
             }
             
-            radiance = Lo + float3(0.03, 0.03, 0.03) * albedo; 
+            // Add ambient from GI (sample the incoming radiance) + base ambient
+            float3 ambient = radiance * albedo * 0.4;
+            float3 baseAmbient = albedo * 0.15; // Always-visible material color
+            
+            // Combine direct PBR + ambient GI + base ambient
+            float3 wallColor = Lo + ambient + baseAmbient;
+            radiance = lerp(radiance, wallColor, edgeFactor);
         }
     }
     
