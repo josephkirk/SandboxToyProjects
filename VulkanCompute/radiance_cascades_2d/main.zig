@@ -1,3 +1,56 @@
+//==============================================================================
+// RADIANCE CASCADES 2D - MAIN APPLICATION
+//==============================================================================
+//
+// A real-time 2D global illumination demo using the Radiance Cascades algorithm.
+// Written in Zig with Vulkan compute shaders for GPU acceleration.
+//
+// === WHAT IS RADIANCE CASCADES? ===
+//
+// Radiance Cascades is a multi-resolution technique for computing global
+// illumination (GI) in real-time. The key insight is that far-away light
+// contributions need less detail than nearby ones, so we can use lower
+// resolution for distant sampling.
+//
+// === RENDERING PIPELINE ===
+//
+// Each frame executes these compute shader passes:
+//
+// 1. CASCADE PASS (cascade.hlsl) - Run for each level, coarse to fine:
+//    - Level 0: Direct lighting + merge GI from upper levels
+//    - Level 1+: Cast rays in distance interval, sample bounces from History
+//
+// 2. ACCUMULATE PASS (accumulate.hlsl):
+//    - Blend current frame with previous frames using EMA
+//    - Smooths out stochastic noise over time
+//
+// 3. DISPLAY PASS (display.hlsl):
+//    - Reinhard tone mapping (HDR -> LDR)
+//    - Gamma correction (linear -> sRGB)
+//
+// 4. BLIT + IMGUI:
+//    - Copy result to swapchain
+//    - Render debug UI overlay
+//
+// === CONTROLS ===
+//
+// - Left Click: Add light (color selected by 1-9 keys)
+// - Right Click: Draw wall (color selected by 1-9 keys)
+// - 1-9: Select color from palette
+// - +/-: Increase/decrease brush size
+// - C: Clear scene
+//
+// === VULKAN CONCEPTS USED ===
+//
+// - Compute Shaders: GPU programs for non-graphics work (our GI calculation)
+// - Storage Images: Textures that shaders can write to (RWTexture2D in HLSL)
+// - Push Constants: Small, fast shader parameters (like uniforms)
+// - Descriptor Sets: Groups of resource bindings for shaders
+// - Memory Barriers: Synchronization between shader passes
+//
+// Author: Nguyen Phi Hung
+//==============================================================================
+
 const std = @import("std");
 const vk_win = @import("vulkan_window");
 const vk_comp = @import("vulkan_compute");
@@ -5,42 +58,57 @@ const imgui = @import("imgui_backend");
 
 const c = vk_win.c;
 
+// Maximum number of cascade levels (resolution halves each level)
 const MAX_CASCADES = 6;
 const MAX_LIGHTS = 256;
 const MAX_OBSTACLES = 4096;
 
+//==============================================================================
+// DATA STRUCTURES
+//
+// These structs are shared between Zig (CPU) and HLSL (GPU). They must be
+// 'extern struct' to ensure consistent memory layout. Padding is explicit
+// to match GPU alignment requirements (typically 16-byte aligned).
+//==============================================================================
+
+/// Light source for the scene. Emits radiance in a circular area.
 const Light = extern struct {
-    pos: [2]f32,
-    radius: f32,
-    padding: f32 = 0.0,
-    color: [3]f32,
+    pos: [2]f32, // Position in screen coordinates
+    radius: f32, // Light influence radius in pixels
+    padding: f32 = 0.0, // GPU alignment (float3 needs 16-byte alignment)
+    color: [3]f32, // RGB emission color (HDR - can exceed 1.0)
     padding2: f32 = 0.0,
 };
 
+/// Wall/obstacle that blocks light and can receive bounced illumination.
 const Obstacle = extern struct {
-    pos: [2]f32,
-    radius: f32,
-    padding: f32 = 0.0,
-    color: [3]f32,
+    pos: [2]f32, // Position in screen coordinates
+    radius: f32, // Circle radius in pixels
+    padding: f32 = 0.0, // GPU alignment
+    color: [3]f32, // Material albedo for rendering
     padding2: f32 = 0.0,
 };
 
+/// Push constants for the cascade shader - small, frequently changing data.
+/// Push constants are faster than uniform buffers for small amounts of data
+/// because they are stored directly in the command buffer.
 const PushConstants = extern struct {
-    level: i32,
-    maxLevel: i32,
-    baseRays: i32,
-    lightCount: i32,
-    obstacleCount: i32,
-    time: f32,
-    showIntervals: i32,
-    stochasticMode: i32, // 0 = deterministic dither, 1 = stochastic noise
-    resolution: [2]f32,
-    blendRadius: f32, // Metaball blend radius for smooth walls
+    level: i32, // Current cascade level (0 = base/direct)
+    maxLevel: i32, // Total cascade levels
+    baseRays: i32, // Ray count at level 0 (doubles each level)
+    lightCount: i32, // Number of active lights
+    obstacleCount: i32, // Number of active obstacles
+    time: f32, // Animation time for temporal noise
+    showIntervals: i32, // Debug: visualize cascade distance rings
+    stochasticMode: i32, // 0 = stable dither, 1 = temporal noise
+    resolution: [2]f32, // Screen dimensions
+    blendRadius: f32, // Metaball SDF blend radius
     padding1: f32 = 0.0,
 };
 
+/// Push constants for the accumulate (temporal blend) shader.
 const AccumConstants = extern struct {
-    blend: f32,
+    blend: f32, // EMA blend factor: 0 = keep history, 1 = use current
 };
 
 // Helper to create a buffer
