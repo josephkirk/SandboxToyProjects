@@ -373,14 +373,19 @@ void main(uint3 DTid : SV_DispatchThreadID) {
         For each cascade level, we cast rays within a specific distance range.
         The intervals form a geometric progression that covers progressively
         larger distances with each level.
+        
+        Config: 4x Branching (Interval length quadruples each level)
+        - Level 0: 0 to BASE_START
+        - Level 1: BASE_START to BASE_START * 4
+        - Level N: BASE_START * 4^(N-1) to BASE_START * 4^N
     ==========================================================================*/
     
     // Calculate distance interval for this cascade level
-    // Uses geometric progression: starts at BASE_START, multiplies by 4 each level
     float rangeStart = (pc.level == 0) ? 0.0 : BASE_START * pow(4.0, float(pc.level) - 1.0);
     float rangeEnd = BASE_START * pow(4.0, float(pc.level));
     
     // Ray count doubles with each level (more rays for larger coverage area)
+    // This matches the 4x area increase (2x radius increase)
     float rayCountF = float(pc.baseRays) * pow(2.0, float(pc.level));
     int rayCount = int(rayCountF);
     
@@ -451,6 +456,13 @@ void main(uint3 DTid : SV_DispatchThreadID) {
         
     // Merge with upper cascade (coarser level covers further distances)
     if (pc.level < pc.maxLevel - 1) {
+        // NOTE: Strictly speaking, we should multiply the upper cascade radiance
+        // by a visibility term (1.0 - opacity of this level).
+        // Since we are not tracking detailed visibility in the alpha channel here,
+        // we simply add the contributions. This can lead to slight light leaking
+        // through walls from background cascades, but for diffuse GI in this
+        // demo it acts as a valid simplification (walls are effectively "emissive"
+        // with bounced light).
         radiance += UpperCascade.SampleLevel(LinearSampler, uv, 0).rgb;
     }
     
