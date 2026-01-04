@@ -392,8 +392,10 @@ fn run_app() !void {
     var blend_speed: f32 = 0.1;
     var base_rays: i32 = 4;
     var show_intervals: bool = false;
-    var blend_radius: f32 = 100.0; // Metaball blend radius (high value fills gaps between circles)
+    var blend_radius: f32 = 100.0; // Metaball blend radius
     var display_debug_mode: i32 = 0; // 0=Normal, 1=L1x, 2=L1y, 3=Vector
+    var accum_iterations: i32 = 1; // Number of cascade+accumulate passes per frame
+    var clear_requested: bool = false; // Flag to trigger history buffer clearing
 
     // Color palette (indexed by 1-9 keys)
     const colors = [_][3]f32{
@@ -688,6 +690,14 @@ fn run_app() !void {
         const historySHRead = if (frame_count % 2 == 0) historySH_A else historySH_B;
         const historySHWrite = if (frame_count % 2 == 0) historySH_B else historySH_A;
 
+        // Clear history buffers if requested (for instant Clear Scene effect)
+        if (clear_requested) {
+            ctx.clearImageArray(cmdbuf, historySH_A.handle, c.VK_IMAGE_LAYOUT_GENERAL, 3, 0, 0, 0, 0);
+            ctx.clearImageArray(cmdbuf, historySH_B.handle, c.VK_IMAGE_LAYOUT_GENERAL, 3, 0, 0, 0, 0);
+            ctx.memoryBarrier(cmdbuf, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, c.VK_ACCESS_TRANSFER_WRITE_BIT, c.VK_ACCESS_SHADER_READ_BIT);
+            clear_requested = false;
+        }
+
         // 1. JFA Pass (Generate SDF from obstacles)
         var jfaResult = jfaImgA;
         {
@@ -804,8 +814,8 @@ fn run_app() !void {
 
         ctx.bindComputePipeline(cmdbuf, accum_pipe);
         ctx.bindDescriptorSet(cmdbuf, c.VK_PIPELINE_BIND_POINT_COMPUTE, accum_layout, activeAccumSet);
-        // Blend speed: in stochastic mode use slider value, otherwise instant (1.0)
-        const effective_blend = if (stochastic_mode) blend_speed else 1.0;
+        // Blend speed: in stochastic mode use slider value * accum_iterations, otherwise instant (1.0)
+        const effective_blend = if (stochastic_mode) @min(blend_speed * @as(f32, @floatFromInt(accum_iterations)), 1.0) else 1.0;
         const ac = AccumConstants{ .blend = effective_blend };
         ctx.pushConstants(cmdbuf, accum_layout, c.VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(AccumConstants), &ac);
 
@@ -864,14 +874,15 @@ fn run_app() !void {
             _ = imgui.sliderFloat("Brush Size", &brush_radius, 5.0, 100.0);
             _ = imgui.sliderFloat("Light Radius", &light_radius, 1.0, 300.0);
             _ = imgui.sliderFloat("Light Intensity", &light_intensity, 0.01, 10.0);
-            _ = imgui.sliderFloat("Light Falloff", &light_falloff, 0.5, 4.0);
+            _ = imgui.sliderFloat("Light Falloff", &light_falloff, 0.1, 4.0);
             imgui.text("Colors (press 1-9 keys)");
 
             imgui.text("");
             imgui.text("Rendering:");
             _ = imgui.checkbox("Stochastic Mode", &stochastic_mode);
-            _ = imgui.sliderFloat("Blend Speed", &blend_speed, 0.01, 1.0);
-            _ = imgui.sliderInt("Base Rays", &base_rays, 1, 8);
+            _ = imgui.sliderFloat("Blend Speed", &blend_speed, 0.001, 2.0);
+            _ = imgui.sliderInt("Accum Iterations", &accum_iterations, 1, 16);
+            _ = imgui.sliderInt("Base Rays", &base_rays, 1, 80);
             _ = imgui.checkbox("Show Intervals", &show_intervals);
             _ = imgui.sliderFloat("GI Smoothness", &blend_radius, 50.0, 200.0);
 
@@ -879,6 +890,7 @@ fn run_app() !void {
             if (imgui.button("Clear Scene")) {
                 lightCount = 0;
                 obstacleCount = 0;
+                clear_requested = true;
             }
         }
         imgui.end();

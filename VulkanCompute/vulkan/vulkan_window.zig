@@ -1326,6 +1326,19 @@ pub const WindowContext = struct {
         c.vkCmdClearColorImage(cmdbuf, image, layout, &clearColor, 1, &range);
     }
 
+    pub fn clearImageArray(self: *WindowContext, cmdbuf: c.VkCommandBuffer, image: c.VkImage, layout: c.VkImageLayout, layers: u32, r: f32, g: f32, b: f32, a: f32) void {
+        _ = self;
+        const clearColor = c.VkClearColorValue{ .float32 = .{ r, g, b, a } };
+        const range = c.VkImageSubresourceRange{
+            .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = layers,
+        };
+        c.vkCmdClearColorImage(cmdbuf, image, layout, &clearColor, 1, &range);
+    }
+
     pub fn memoryBarrier(self: *WindowContext, cmdbuf: c.VkCommandBuffer, src_stage: c.VkPipelineStageFlags, dst_stage: c.VkPipelineStageFlags, src_access: c.VkAccessFlags, dst_access: c.VkAccessFlags) void {
         _ = self;
         var barrier = c.VkMemoryBarrier{

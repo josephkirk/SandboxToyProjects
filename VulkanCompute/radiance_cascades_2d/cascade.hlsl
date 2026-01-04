@@ -176,7 +176,6 @@ float map(float2 p) {
 }
 
 // Sharp SDF without smooth blending - used for wall material ID lookup
-// We need exact per-obstacle detection to know which color to use
 float mapSharp(float2 p) {
     float2 center = pc.resolution * 0.5;
     float d = -sdBox(p - center, center - 2.0);
@@ -188,23 +187,56 @@ float mapSharp(float2 p) {
     return d;
 }
 
+// Fast SDF lookup using pre-computed JFA (Jump Flooding Algorithm)
+// JFABuffer stores (x, y) position of the nearest obstacle seed for each pixel.
+// Returns distance to nearest obstacle surface.
+float mapJFA(float2 p) {
+    float2 center = pc.resolution * 0.5;
+    float roomDist = -sdBox(p - center, center - 2.0);
+    
+    // Get UV coordinates for JFA texture lookup
+    float2 jfaUV = p / pc.resolution;
+    if(jfaUV.x < 0.0 || jfaUV.x > 1.0 || jfaUV.y < 0.0 || jfaUV.y > 1.0) {
+        return roomDist;
+    }
+    
+    // Sample nearest seed position from JFA
+    float2 nearestSeed = JFABuffer.SampleLevel(LinearSampler, jfaUV, 0).xy;
+    
+    // If no seed found (0,0 or invalid), return room distance
+    if(nearestSeed.x <= 0.0 && nearestSeed.y <= 0.0) {
+        return roomDist;
+    }
+    
+    // Find the obstacle at the seed position to get its radius
+    float minDist = 9999.0;
+    for(int i = 0; i < pc.obstacleCount; i++) {
+        Obstacle obs = ObstacleBuffer[i];
+        float seedToDist = length(nearestSeed - obs.pos);
+        if(seedToDist < obs.radius + 1.0) {
+            // This is the closest obstacle to the seed
+            float d = length(p - obs.pos) - obs.radius;
+            minDist = min(minDist, d);
+            break;
+        }
+    }
+    
+    return min(roomDist, minDist);
+}
+
 /*==============================================================================
     LIGHTING UTILITIES
 ==============================================================================*/
 
 // Analytic light segment integration
-// Calculates how much of a ray segment passes through a spherical light
-// Returns contribution weighted by distance (closer = brighter)
 float integrateLightSegment(float2 ro, float2 rd, float tMin, float tMax, float2 lightPos, float radius) {
     float2 L = lightPos - ro;
-    float tClosest = dot(L, rd);  // Project light center onto ray
+    float tClosest = dot(L, rd);
     float2 pClosest = ro + rd * tClosest;
     float distSq = dot(pClosest - lightPos, pClosest - lightPos);
     
-    // Ray misses the light entirely
     if(distSq > radius * radius) return 0.0;
     
-    // Calculate chord intersection with light sphere
     float halfChord = sqrt(radius * radius - distSq);
     float start = max(tMin, tClosest - halfChord);
     float end = min(tMax, tClosest + halfChord);
@@ -214,15 +246,15 @@ float integrateLightSegment(float2 ro, float2 rd, float tMin, float tMax, float2
     return (end - start) / max(1.0, d/radius); 
 }
 
-// Sphere-tracing ray march: find distance to first wall hit
-// Returns the distance traveled before hitting something (or maxDist if no hit)
+// Sphere-tracing ray march using smooth SDF
+// Note: mapJFA is faster but produces blocky edges due to discrete JFA lookup
 float rayMarchVis(float2 ro, float2 rd, float maxDist) {
     float t = 0.0;
     for(int i = 0; i < 32; i++) { 
         float2 p = ro + rd * t;
-        float d = map(p);
-        if(d < 0.1) return t;  // Hit threshold
-        t += d;                 // Step by SDF distance (safe step)
+        float d = map(p);  // Use smooth SDF (loops through obstacles)
+        if(d < 0.1) return t;
+        t += d;
         if(t >= maxDist) return maxDist; 
     }
     return maxDist;
@@ -356,15 +388,10 @@ void main(uint3 DTid : SV_DispatchThreadID) {
         float3 gi_L0 = UpperSH.SampleLevel(LinearSampler, float3(uv, 0), 0).rgb;
         float3 gi_L1x = UpperSH.SampleLevel(LinearSampler, float3(uv, 1), 0).rgb;
         float3 gi_L1y = UpperSH.SampleLevel(LinearSampler, float3(uv, 2), 0).rgb;
-        L0 += gi_L0;
-        L1x += gi_L1x;
-        L1y += gi_L1y;
-        
-        // Compute radiance for display (reconstruct from SH for isotropic view, angle=0)
-        float3 radiance = L0;
         
         /*----------------------------------------------------------------------
             WALL MATERIAL RENDERING
+            Compute wall edge before merging GI to mask blurry cascade artifacts
         ----------------------------------------------------------------------*/
         float minDist = 9999.0;
         int hitID = -1;
@@ -377,7 +404,16 @@ void main(uint3 DTid : SV_DispatchThreadID) {
             }
         }
         
-        // Smooth edge
+        // Edge masking: reduce GI contribution near walls to avoid blurry shadow outline
+        // Higher cascades are low-res and create blocky wall representations
+        float giMask = smoothstep(-5.0, 15.0, minDist);
+        L0 += gi_L0 * giMask;
+        L1x += gi_L1x * giMask;
+        L1y += gi_L1y * giMask;
+        
+        float3 radiance = L0;
+        
+        // Smooth edge for wall rendering
         float edgeWidth = 3.0;
         float edgeFactor = 1.0 - smoothstep(-edgeWidth, edgeWidth, minDist);
         
@@ -386,7 +422,6 @@ void main(uint3 DTid : SV_DispatchThreadID) {
             float3 albedo = obs.color;
             float3 wallColor = albedo * 0.2 + radiance * albedo * 0.5;
             radiance = lerp(radiance, wallColor, edgeFactor);
-            // Also attenuate directional components on walls
             L1x = lerp(L1x, L1x * 0.5, edgeFactor);
             L1y = lerp(L1y, L1y * 0.5, edgeFactor);
         }
@@ -442,6 +477,7 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     float3 L1x = float3(0.0, 0.0, 0.0);
     float3 L1y = float3(0.0, 0.0, 0.0);
     
+    // Loop limit must be >= baseRays * 2^maxLevel (e.g., 80 * 32 = 2560)
     for(int r = 0; r < 512; r++) {
         if(r >= rayCount) break;
         
@@ -492,18 +528,20 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     }
         
     // Merge with upper cascade (coarser level covers further distances)
+    // Apply edge masking to prevent blurry shadow outline from low-res upper cascades
     if (pc.level < pc.maxLevel - 1) {
-        // NOTE: Strictly speaking, we should multiply the upper cascade radiance
-        // by a visibility term (1.0 - opacity of this level).
-        // Since we are not tracking detailed visibility in the alpha channel here,
-        // we simply add the contributions. This can lead to slight light leaking
-        // through walls from background cascades, but for diffuse GI in this
-        // demo it acts as a valid simplification (walls are effectively "emissive"
-        // with bounced light).
-        // Merge SH from upper cascade using array layers
-        L0 += UpperSH.SampleLevel(LinearSampler, float3(uv, 0), 0).rgb;
-        L1x += UpperSH.SampleLevel(LinearSampler, float3(uv, 1), 0).rgb;
-        L1y += UpperSH.SampleLevel(LinearSampler, float3(uv, 2), 0).rgb;
+        // Compute distance to nearest wall for GI masking
+        float minDist = 9999.0;
+        for(int i = 0; i < pc.obstacleCount; i++) {
+            Obstacle obs = ObstacleBuffer[i];
+            float d = length(worldPos - obs.pos) - obs.radius;
+            minDist = min(minDist, d);
+        }
+        float giMask = smoothstep(-5.0, 20.0, minDist);
+        
+        L0 += UpperSH.SampleLevel(LinearSampler, float3(uv, 0), 0).rgb * giMask;
+        L1x += UpperSH.SampleLevel(LinearSampler, float3(uv, 1), 0).rgb * giMask;
+        L1y += UpperSH.SampleLevel(LinearSampler, float3(uv, 2), 0).rgb * giMask;
     }
     
     /*--------------------------------------------------------------------------
