@@ -19,12 +19,18 @@ A high-performance gravitational N-body simulation using the **Barnes-Hut** algo
 ![nbody](docs/nbody.gif)
 
 ### [Vulkan Compute Learning](./VulkanCompute)
+
+#### [SandSim](./VulkanCompute/sand_sim)
 A "simple" sand simulation project implemented in **Zig** and built using directly **Vulkan** API to learn how Vulkan and general graphic pipeline work.
 All Vulkan codes is verbally commented for learning purposes. The project demonstrate graphic pipeline from compute ( sand sim ) with hlsl to fragment pass writen in glsl for visualization then to compute again in hlsl (TAA) then post-process with CRT effect.
 - **Input**: 1 for simple shader, 2 for text shader, 3 to toggle post process
 
 ![sand](docs/sandfall.gif)
 
+#### [Radiance Cascades 2D](./VulkanCompute/radiance_cascades_2d)
+A real-time 2D Global Illumination renderer implemented in **Zig** and **Vulkan Compute** following https://jason.today/rc tutorial.
+
+![rc](docs/rc.gif)
 
 
 ### [Odin Game Server](./Odin)
@@ -35,10 +41,6 @@ A "Vampire Survival" style rogue-like game engine built to experiment with decou
 
 ![serverclient](docs/serverclient.gif)
 
-### [Radiance Cascades 2D](./VulkanCompute/radiance_cascades_2d)
-A real-time 2D Global Illumination renderer implemented in **Zig** and **Vulkan Compute** following https://jason.today/rc tutorial.
-
-![rc](docs/rc.gif)
 
 ## Author
 Nguyen Phi Hung
