@@ -136,12 +136,12 @@ fn createLinearSampler(ctx: *vk_win.WindowContext) !c.VkSampler {
         .sType = c.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .magFilter = c.VK_FILTER_LINEAR,
         .minFilter = c.VK_FILTER_LINEAR,
-        .addressModeU = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
-        .addressModeV = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
-        .addressModeW = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+        .addressModeU = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
         .anisotropyEnable = c.VK_FALSE,
         .maxAnisotropy = 1.0,
-        .borderColor = c.VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+        .borderColor = c.VK_BORDER_COLOR_INT_OPAQUE_BLACK,
         .unnormalizedCoordinates = c.VK_FALSE,
         .compareEnable = c.VK_FALSE,
         .compareOp = c.VK_COMPARE_OP_ALWAYS,
@@ -218,16 +218,14 @@ fn run_app() !void {
     var cascadesSH = try std.ArrayList(vk_win.StorageImageArray).initCapacity(allocator, MAX_CASCADES);
     defer cascadesSH.deinit(allocator);
 
+    var w: u32 = ctx.width;
+    var h: u32 = ctx.height;
+
     for (0..MAX_CASCADES) |_| {
-        // Probe-Based RC requires FULL RESOLUTION textures for every level.
-        // Unlike naive RC which downscales, Probe-Based RC uses "Spatial Dithering"
-        // where higher levels trade spatial resolution for angular resolution.
-        // - Level 0: 1024x1024 spatial, 1 ray/pixel.
-        // - Level 1: 512x512 spatial, 4 rays/pixel (packed as 2x2 blocks).
-        // - Level 2: 256x256 spatial, 16 rays/pixel (packed as 4x4 blocks).
-        // Total pixels remain constant (1024x1024) to store the data.
-        const img = try ctx.createStorageImageArray(ctx.width, ctx.height, 3, c.VK_FORMAT_R32G32B32A32_SFLOAT);
+        const img = try ctx.createStorageImageArray(w, h, 3, c.VK_FORMAT_R32G32B32A32_SFLOAT);
         try cascadesSH.append(allocator, img);
+        w = @max(1, w / 2);
+        h = @max(1, h / 2);
     }
     defer {
         for (cascadesSH.items) |img| img.destroy(ctx.device);
@@ -701,10 +699,6 @@ fn run_app() !void {
         }
 
         // 1. JFA Pass (Generate SDF from obstacles)
-        // NOTE: This runs the Jump Flooding Algorithm to generate a Voronoi seed texture.
-        // Currently, the 'cascade.hlsl' shader uses an O(N) loop for SDF (map function)
-        // for higher precision/smoothness, so this JFA result is generated but effectively
-        // unused for the primary light raymarching. It is kept here for future optimization.
         var jfaResult = jfaImgA;
         {
             // Update JFA Descriptors

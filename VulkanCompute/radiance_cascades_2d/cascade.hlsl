@@ -1,115 +1,88 @@
 /*==============================================================================
-    RADIANCE CASCADES 2D - CORE CASCADE COMPUTE SHADER
+    RADIANCE CASCADES 2D - PROBE-BASED IMPLEMENTATION
     ============================================================================
     
-    This shader implements the Radiance Cascades algorithm for real-time 2D
-    global illumination (GI). The key insight is that radiance information at
-    different distances can be computed at different resolutions - far away
-    light needs less detail than nearby light.
+    Refactored to match the efficient Probe-Based Radiance Cascades algorithm.
     
-    ==== CORE CONCEPTS ====
+    KEY DIFFERENCES FROM NAIVE:
+    1.  Fixed Ray Count: We always cast BASE_RAYS (4) rays per pixel, 
+        regardless of cascade level.
+    2.  Probe Addressing (Atlas): Higher levels use "Probes" to distribute 
+        rays spatially. We use the texture as an Atlas where adjacent 
+        pixels represent the same spatial location but different ray directions.
+    3.  Bilinear Merging: Correctly interpolates radiance from the coarser 
+        upper cascade.
+    4.  Interval Logic: Proper geometric progression for ray lengths.
     
-    1. CASCADE LEVELS:
-       - Level 0: Direct lighting (closest rays, highest detail)
-       - Level 1..N: Indirect lighting / GI bounces (further rays, lower detail)
-       - Each level handles a specific distance interval
-       
-    2. INTERVAL SPACING (Geometric Progression):
-       - Level 0: 0 to BASE_START pixels
-       - Level 1: BASE_START to BASE_START * 4
-       - Level N: BASE_START * 4^(N-1) to BASE_START * 4^N
-       
-    3. RAY COUNT SCALING:
-       - Higher levels use more rays (covers larger area)
-       - Rays per level = baseRays * 2^level
-       
-    4. MERGING:
-       - Each level merges with the level above it
-       - Creates a complete picture: direct light + GI from all distances
-    
-    ==== RENDERING FLOW ====
-    
-    For each pixel:
-      1. If level == 0: Compute direct lighting from all light sources
-      2. Else: Cast rays in the cascade's distance interval
-      3. For each ray hit: Sample the History buffer (previous frame) for bounce
-      4. Merge with UpperCascade (coarser level)
-      5. Render wall materials with PBR if inside an obstacle
-    
-    Author: Nguyen Phi Hung
+    Data Layout:
+    - Level > 0 (Intermediate): Output Texture Layer 0 stores Radiance (RGB) + Alpha (A).
+      The texture is effectively an Atlas of directions.
+    - Level 0 (Final): Output Texture Layers 0,1,2 store SH (L0, L1x, L1y).
+      This preserves compatibility with the Accumulation/Display passes.
+      
+    Author: Nguyen Phi Hung (Refactored)
 ==============================================================================*/
 
 #define PI 3.14159265
+#define TAU 6.28318530718
 
-// BASE_START: The distance where cascade intervals begin.
-// Level 0 covers 0 to BASE_START, Level 1 covers BASE_START to BASE_START*4, etc.
-#define BASE_START 2.0
+// CONSTANTS matching the reference customization
+#define BASE_RAYS 4
+#define CASCADE_INTERVAL 1.0
+#define RAY_INTERVAL 1.0
 
 /*------------------------------------------------------------------------------
-    DATA STRUCTURES - Must exactly match Zig struct layouts (extern struct)
+    DATA STRUCTURES
 ------------------------------------------------------------------------------*/
 
 struct Light {
-    float2 pos;      // Position in screen coordinates
-    float radius;    // Light influence radius
-    float padding;   // GPU alignment padding
-    float3 color;    // RGB color (HDR values allowed)
-    float padding2;  // GPU alignment padding
+    float2 pos;
+    float radius;
+    float falloff;
+    float3 color;
+    float padding2;
 };
 
 struct Obstacle {
-    float2 pos;      // Position in screen coordinates  
-    float radius;    // Circle radius
-    float padding;   // GPU alignment padding
-    float3 color;    // Material albedo for PBR rendering
-    float padding2;  // GPU alignment padding
+    float2 pos;
+    float radius;
+    float padding;
+    float3 color;
+    float padding2;
 };
 
-// Push constants are small amounts of data passed directly to shaders.
-// More efficient than uniform buffers for frequently-changing small data.
 struct PushConstants {
-    int level;           // Current cascade level (0 = base/direct light)
-    int maxLevel;        // Total number of cascade levels
-    int baseRays;        // Number of rays at level 0 (scales up with level)
-    int lightCount;      // Number of active lights
-    int obstacleCount;   // Number of active obstacles/walls
-    float time;          // Animation time for temporal noise
+    int level;
+    int maxLevel;
+    int baseRays;        // Should be 4
+    int lightCount;
+    int obstacleCount;
+    float time;
     int showIntervals;   // Debug: visualize cascade intervals
-    int stochasticMode;  // 0 = stable dither, 1 = temporal noise (for accumulation)
-    float2 resolution;   // Screen dimensions in pixels
-    float blendRadius;   // Smooth union radius for wall SDF (metaball effect)
-    float padding1;      // Alignment padding
+    int stochasticMode;
+    float2 resolution;
+    float blendRadius;
+    float padding1;
 };
 
 [[vk::push_constant]] PushConstants pc;
 
 /*------------------------------------------------------------------------------
-    RESOURCE BINDINGS
-    
-    In Vulkan, resources are bound to numbered "slots" in descriptor sets.
-    [[vk::binding(N, M)]] = binding N in descriptor set M
+    RESOURCES
 ------------------------------------------------------------------------------*/
 
-// Output: SH coefficients array (Layer 0=L0, Layer 1=L1x, Layer 2=L1y)
 [[vk::binding(0, 0)]] RWTexture2DArray<float4> OutputSH;
-
-// UpperCascade: SH from coarser level
 [[vk::binding(1, 0)]] Texture2DArray<float4> UpperSH;
-
-// History: Previous frame's SH for bounce lighting
 [[vk::binding(2, 0)]] Texture2DArray<float4> HistorySH;
-
-// Light and Obstacle buffers - GPU-side storage
 [[vk::binding(3, 0)]] StructuredBuffer<Light> LightBuffer;
 [[vk::binding(4, 0)]] StructuredBuffer<Obstacle> ObstacleBuffer;
-
-// Linear sampler for smooth texture interpolation
 [[vk::binding(5, 0)]] SamplerState LinearSampler;
-
-// JFA Buffer
 [[vk::binding(6, 0)]] Texture2D<float2> JFABuffer;
 
-// SH Helpers
+/*------------------------------------------------------------------------------
+    HELPERS
+------------------------------------------------------------------------------*/
+
 void encodeSH(float angle, float3 radiance, inout float3 L0, inout float3 L1x, inout float3 L1y) {
     L0 += radiance;
     L1x += radiance * cos(angle);
@@ -126,109 +99,6 @@ float dirToAngle(float2 dir) {
     return atan2(dir.y, dir.x);
 }
 
-/*==============================================================================
-    SIGNED DISTANCE FUNCTIONS (SDF)
-    
-    SDFs return the distance from a point to the nearest surface:
-    - Negative = inside the shape
-    - Zero = on the surface
-    - Positive = outside the shape
-    
-    SDFs enable efficient ray marching: step by the SDF value each iteration
-    (you cannot hit anything sooner than that distance).
-==============================================================================*/
-
-// Circle SDF: distance from point to circle edge
-float sdCircle(float2 p, float r) { 
-    return length(p) - r; 
-}
-
-// Box SDF: distance from point to box edge
-float sdBox(float2 p, float2 b) {
-    float2 d = abs(p) - b;
-    // Outside: use Euclidean distance to corner
-    // Inside: use Chebyshev distance (max component)
-    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
-}
-
-// Smooth minimum: blends two SDFs together like metaballs
-// k controls blend radius (larger = smoother blending)
-// Uses polynomial smoothing for C1 continuity
-float smin(float a, float b, float k) {
-    float h = max(k - abs(a - b), 0.0) / k;
-    return min(a, b) - h * h * k * 0.25;
-}
-
-// Scene SDF with smooth blending - used for GI ray marching
-// The smin creates organic, blob-like shapes from circles
-float map(float2 p) {
-    // Room boundary: inverted box SDF (inside is positive)
-    float2 center = pc.resolution * 0.5;
-    float d = -sdBox(p - center, center - 2.0);
-
-    // Blend all obstacles using smooth minimum
-    for(int i = 0; i < pc.obstacleCount; i++) {
-        Obstacle obs = ObstacleBuffer[i];
-        float obsDist = sdCircle(p - obs.pos, obs.radius);
-        d = smin(d, obsDist, pc.blendRadius);
-    }
-    return d;
-}
-
-// Sharp SDF without smooth blending - used for wall material ID lookup
-float mapSharp(float2 p) {
-    float2 center = pc.resolution * 0.5;
-    float d = -sdBox(p - center, center - 2.0);
-    
-    for(int i = 0; i < pc.obstacleCount; i++) {
-        Obstacle obs = ObstacleBuffer[i];
-        d = min(d, sdCircle(p - obs.pos, obs.radius));
-    }
-    return d;
-}
-
-// Fast SDF lookup using pre-computed JFA (Jump Flooding Algorithm)
-// JFABuffer stores (x, y) position of the nearest obstacle seed for each pixel.
-// Returns distance to nearest obstacle surface.
-float mapJFA(float2 p) {
-    float2 center = pc.resolution * 0.5;
-    float roomDist = -sdBox(p - center, center - 2.0);
-    
-    // Get UV coordinates for JFA texture lookup
-    float2 jfaUV = p / pc.resolution;
-    if(jfaUV.x < 0.0 || jfaUV.x > 1.0 || jfaUV.y < 0.0 || jfaUV.y > 1.0) {
-        return roomDist;
-    }
-    
-    // Sample nearest seed position from JFA
-    float2 nearestSeed = JFABuffer.SampleLevel(LinearSampler, jfaUV, 0).xy;
-    
-    // If no seed found (0,0 or invalid), return room distance
-    if(nearestSeed.x <= 0.0 && nearestSeed.y <= 0.0) {
-        return roomDist;
-    }
-    
-    // Find the obstacle at the seed position to get its radius
-    float minDist = 9999.0;
-    for(int i = 0; i < pc.obstacleCount; i++) {
-        Obstacle obs = ObstacleBuffer[i];
-        float seedToDist = length(nearestSeed - obs.pos);
-        if(seedToDist < obs.radius + 1.0) {
-            // This is the closest obstacle to the seed
-            float d = length(p - obs.pos) - obs.radius;
-            minDist = min(minDist, d);
-            break;
-        }
-    }
-    
-    return min(roomDist, minDist);
-}
-
-/*==============================================================================
-    LIGHTING UTILITIES
-==============================================================================*/
-
-// Analytic light segment integration
 float integrateLightSegment(float2 ro, float2 rd, float tMin, float tMax, float2 lightPos, float radius) {
     float2 L = lightPos - ro;
     float tClosest = dot(L, rd);
@@ -246,13 +116,35 @@ float integrateLightSegment(float2 ro, float2 rd, float tMin, float tMax, float2
     return (end - start) / max(1.0, d/radius); 
 }
 
-// Sphere-tracing ray march using smooth SDF
-// Note: mapJFA is faster but produces blocky edges due to discrete JFA lookup
+/*------------------------------------------------------------------------------
+    SDF FUNCTIONS
+------------------------------------------------------------------------------*/
+
+float sdCircle(float2 p, float r) { return length(p) - r; }
+float sdBox(float2 p, float2 b) {
+    float2 d = abs(p) - b;
+    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+}
+float smin(float a, float b, float k) {
+    float h = max(k - abs(a - b), 0.0) / k;
+    return min(a, b) - h * h * k * 0.25;
+}
+
+float map(float2 p) {
+    float2 center = pc.resolution * 0.5;
+    float d = -sdBox(p - center, center - 2.0);
+    for(int i = 0; i < pc.obstacleCount; i++) {
+        Obstacle obs = ObstacleBuffer[i];
+        d = smin(d, sdCircle(p - obs.pos, obs.radius), pc.blendRadius);
+    }
+    return d;
+}
+
 float rayMarchVis(float2 ro, float2 rd, float maxDist) {
     float t = 0.0;
     for(int i = 0; i < 32; i++) { 
         float2 p = ro + rd * t;
-        float d = map(p);  // Use smooth SDF (loops through obstacles)
+        float d = map(p);
         if(d < 0.1) return t;
         t += d;
         if(t >= maxDist) return maxDist; 
@@ -260,360 +152,306 @@ float rayMarchVis(float2 ro, float2 rd, float maxDist) {
     return maxDist;
 }
 
-// Gold noise: high-quality pseudo-random based on golden ratio
-// Used for stochastic ray jittering in temporal accumulation mode
 float gold_noise(float2 xy, float seed){
    return frac(tan(distance(xy*1.61803398874989484820459, xy)*seed)*xy.x);
 }
 
-/*==============================================================================
-    PBR (Physically Based Rendering) UTILITIES
+/*------------------------------------------------------------------------------
+    BILINEAR FIX & MERGE
+------------------------------------------------------------------------------*/
+
+// Sample the Upper Cascade (which is an Atlas)
+// We need to find the correct 4 probes that surround the current position (in probe space)
+// and interpolate their results.
+// Note: Upper Cascade Logic
+// spacing = 2^(level+1)
+// size = resolution / spacing
+// We are at 'level'. Merge from 'level+1'.
+
+// Safe modulo for positive/negative consistency
+float my_mod(float x, float y) {
+    return x - y * floor(x/y);
+}
+
+float4 merge(float4 currentRadiance, float index, float2 position, float spacingBase, float cascadeIndex) {
+    if (cascadeIndex >= float(pc.maxLevel) - 1.0) {
+        return currentRadiance;
+    }
     
-    These implement the Cook-Torrance microfacet BRDF for realistic shading.
-    While this is a 2D GI demo, we use PBR for nice-looking wall materials.
-==============================================================================*/
+    if (currentRadiance.a >= 1.0) {
+        return currentRadiance;
+    }
 
-// GGX/Trowbridge-Reitz Normal Distribution Function
-// Models the statistical distribution of microfacet normals
-// Higher roughness = wider highlight, lower roughness = sharper specular
-float DistributionGGX(float3 N, float3 H, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float NdotH = max(dot(N, H), 0.0);
-    float NdotH2 = NdotH * NdotH;
-    float num = a2;
-    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
-    denom = PI * denom * denom;
-    return num / max(denom, 0.0001);
+    // Upper Cascade Parameters
+    // spacingBase is 4 (baseRays) or 2 (sqrtBase)?
+    // Passed as sqrtBase (2.0 typically).
+    
+    float upperSpacing = pow(spacingBase, cascadeIndex + 1.0);
+    float2 cascadeExtent = pc.resolution;
+    float2 upperSize = floor(cascadeExtent / upperSpacing);
+    
+    // Calculate upper atlas position
+    // Matches reference: vec2(mod(index, upperSpacing), floor(index / upperSpacing)) * upperSize
+    float x_offset = my_mod(index, upperSpacing);
+    float y_offset = floor(index / upperSpacing);
+    
+    float2 upperPosition = float2(x_offset, y_offset) * upperSize;
+
+    // Offset relates to spatial position within the probe
+    // position is probeRelativePosition (from main)
+    float2 offset = (position + 0.5) / spacingBase; 
+    
+    // Bilinear sampling logic
+    float2 clamped = clamp(offset, float2(0.5, 0.5), upperSize - 0.5);
+    float2 samplePosition = (upperPosition + clamped);
+    
+    // Sample Upper Cascade
+    float2 uv = samplePosition / cascadeExtent;
+    float4 upperSample = UpperSH.SampleLevel(LinearSampler, float3(uv, 0), 0);
+    
+    return float4(
+        currentRadiance.rgb + upperSample.rgb,
+        currentRadiance.a + upperSample.a // Add visibility/alpha
+    );
 }
 
-// Schlick-GGX Geometry Function (single direction)
-// Models self-shadowing of microfacets
-float GeometrySchlickGGX(float NdotV, float roughness) {
-    float r = (roughness + 1.0);
-    float k = (r*r) / 8.0;
-    float num = NdotV;
-    float denom = NdotV * (1.0 - k) + k;
-    return num / max(denom, 0.0001);
-}
-
-// Smith Geometry Function: combines view and light direction shadowing
-float GeometrySmith(float3 N, float3 V, float3 L, float roughness) {
-    float NdotV = max(dot(N, V), 0.0);
-    float NdotL = max(dot(N, L), 0.0);
-    float ggx2 = GeometrySchlickGGX(NdotV, roughness);
-    float ggx1 = GeometrySchlickGGX(NdotL, roughness);
-    return ggx1 * ggx2;
-}
-
-// Fresnel-Schlick: reflectance increases at grazing angles
-// F0 = reflectance at normal incidence (0.04 for dielectrics)
-float3 FresnelSchlick(float cosTheta, float3 F0) {
-    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-}
-
-/*==============================================================================
+/*------------------------------------------------------------------------------
     MAIN COMPUTE SHADER
-    
-    Dispatched in 16x16 thread groups. Each thread handles one pixel.
-    The behavior changes based on cascade level:
-    - Level 0: Direct lighting + merge GI from higher levels
-    - Level 1+: Ray march for indirect lighting in distance interval
-==============================================================================*/
+------------------------------------------------------------------------------*/
 
 [numthreads(16, 16, 1)]
 void main(uint3 DTid : SV_DispatchThreadID) {
-    // Bounds check - threads outside image dimensions exit early
     uint dim_w, dim_h, dim_layers;
     OutputSH.GetDimensions(dim_w, dim_h, dim_layers);
     if (DTid.x >= dim_w || DTid.y >= dim_h) return;
 
-    // Calculate UV and world position for this pixel
-    float2 uv = (float2(DTid.xy) + 0.5) / float2((float)dim_w, (float)dim_h);
-    float2 worldPos = uv * pc.resolution;
+    float2 coord = float2(DTid.xy);
+    float2 resolution = pc.resolution;
+    float cascadeIndex = float(pc.level);
     
-    /*==========================================================================
-        LEVEL 0: DIRECT LIGHTING PATH
-        
-        This is the base level - computes lighting directly from light sources.
-        Also merges the GI from all higher cascade levels into the final image.
-    ==========================================================================*/
-    if (pc.level == 0) {
-        float3 L0 = float3(0.0, 0.0, 0.0);
-        float3 L1x = float3(0.0, 0.0, 0.0);
-        float3 L1y = float3(0.0, 0.0, 0.0);
-        
-        // For each light, ray march to check for occlusion and encode direction
-        for (int l = 0; l < pc.lightCount; l++) {
-            Light light = LightBuffer[l];
-            float2 toLight = light.pos - worldPos;
-            float dist = length(toLight);
-            float2 dir = toLight / max(dist, 0.001);
-            
-            // Shadow ray: check if any obstacle blocks the light
-            bool occluded = false;
-            float t = 0.0;
-            for (int step = 0; step < 32; step++) {
-                float2 p = worldPos + dir * t;
-                
-                // Find closest obstacle
-                float minDist = 9999.0;
-                for (int o = 0; o < pc.obstacleCount; o++) {
-                    Obstacle obs = ObstacleBuffer[o];
-                    float d = length(p - obs.pos) - obs.radius;
-                    minDist = min(minDist, d);
-                }
-                
-                if (minDist < 1.0) {
-                    occluded = true;
-                    break;
-                }
-                
-                t += max(minDist, 2.0);
-                if (t >= dist) break;
-            }
-            
-            // Add light contribution with SH encoding if not occluded
-            if (!occluded) {
-                float falloff = 1.0 / (1.0 + dist * dist * 0.001);
-                float3 lightContrib = light.color * falloff;
-                
-                // Encode light direction into SH coefficients
-                float angle = dirToAngle(dir);
-                encodeSH(angle, lightContrib, L0, L1x, L1y);
-            }
-        }
-        
-        // CRITICAL: Merge global illumination from higher cascade levels
-        float3 gi_L0 = UpperSH.SampleLevel(LinearSampler, float3(uv, 0), 0).rgb;
-        float3 gi_L1x = UpperSH.SampleLevel(LinearSampler, float3(uv, 1), 0).rgb;
-        float3 gi_L1y = UpperSH.SampleLevel(LinearSampler, float3(uv, 2), 0).rgb;
-        
-        /*----------------------------------------------------------------------
-            WALL MATERIAL RENDERING
-            Compute wall edge before merging GI to mask blurry cascade artifacts
-        ----------------------------------------------------------------------*/
-        float minDist = 9999.0;
-        int hitID = -1;
-        for(int i = 0; i < pc.obstacleCount; i++) {
-            Obstacle obs = ObstacleBuffer[i];
-            float d = length(worldPos - obs.pos) - obs.radius;
-            if(d < minDist) {
-                minDist = d;
-                hitID = i;
-            }
-        }
-        
-        // Edge masking: reduce GI contribution near walls to avoid blurry shadow outline
-        // Higher cascades are low-res and create blocky wall representations
-        float giMask = smoothstep(-5.0, 15.0, minDist);
-        L0 += gi_L0 * giMask;
-        L1x += gi_L1x * giMask;
-        L1y += gi_L1y * giMask;
-        
-        float3 radiance = L0;
-        
-        // Smooth edge for wall rendering
-        float edgeWidth = 3.0;
-        float edgeFactor = 1.0 - smoothstep(-edgeWidth, edgeWidth, minDist);
-        
-        if(edgeFactor > 0.0 && hitID != -1) {
-            Obstacle obs = ObstacleBuffer[hitID];
-            float3 albedo = obs.color;
-            float3 wallColor = albedo * 0.2 + radiance * albedo * 0.5;
-            radiance = lerp(radiance, wallColor, edgeFactor);
-            L1x = lerp(L1x, L1x * 0.5, edgeFactor);
-            L1y = lerp(L1y, L1y * 0.5, edgeFactor);
-        }
-        
-        // Write SH coefficients to array layers
-        OutputSH[uint3(DTid.xy, 0)] = float4(L0, 1.0);
-        OutputSH[uint3(DTid.xy, 1)] = float4(L1x, 0.0);
-        OutputSH[uint3(DTid.xy, 2)] = float4(L1y, 0.0);
-        return;
-    }
+    // Geometric Progression Parameters
+    float base = float(BASE_RAYS); // 4.0
+    float sqrtBase = sqrt(base);   // 2.0
     
-    /*==========================================================================
-        LEVEL 1+: CASCADE RADIANCE COMPUTATION
-        
-        For each cascade level, we cast rays within a specific distance range.
-        The intervals form a geometric progression that covers progressively
-        larger distances with each level.
-        
-        Config: 4x Branching (Interval length quadruples each level)
-        - Level 0: 0 to BASE_START
-        - Level 1: BASE_START to BASE_START * 4
-        - Level N: BASE_START * 4^(N-1) to BASE_START * 4^N
-    ==========================================================================*/
+    // Calculate Ray Count and Spacing for this level
+    // In Probe-Based, we don't scale ray count PER PIXEL, but the logical ray count scaling exists
+    // spacing = 2^level
+    float spacing = pow(sqrtBase, cascadeIndex);
     
-    // Calculate distance interval for this cascade level
-    float rangeStart = (pc.level == 0) ? 0.0 : BASE_START * pow(4.0, float(pc.level) - 1.0);
-    float rangeEnd = BASE_START * pow(4.0, float(pc.level));
+    // Grid sizing
+    float2 size = floor(resolution / spacing);
     
-    // Ray count doubles with each level (more rays for larger coverage area)
-    // This matches the 4x area increase (2x radius increase)
-    float rayCountF = float(pc.baseRays) * pow(2.0, float(pc.level));
-    int rayCount = int(rayCountF);
+    // Addressing the Probe Atlas
+    // probeRelativePosition: Where we are spatially (wrapping every 'size' pixels)
+    // This effectively tiles the screen into 'spacing' x 'spacing' grids
+    float2 probeRelativePosition = fmod(coord, size);
     
-    /*--------------------------------------------------------------------------
-        STOCHASTIC VS DETERMINISTIC NOISE
-        
-        - Stochastic: Uses time-varying noise. Produces noisy frames that 
-          smooth out with temporal accumulation. Best for animation.
-        - Deterministic: Uses consistent dither pattern. Stable but shows
-          visible pattern. Best for static scenes.
-    --------------------------------------------------------------------------*/
-    float noise;
-    if (pc.stochasticMode != 0) {
-        noise = gold_noise(DTid.xy, pc.time + float(pc.level) * 13.0);
+    // rayPos: Which ray subset (probe index) are we calculating?
+    // 0..(spacing-1)
+    float2 rayPos = floor(coord / size); 
+    
+    // Determine the base index of rays for this pixel
+    // Each pixel computes 'base' (4) rays starting from baseIndex
+    // The 'index' in the loop will range [baseIndex, baseIndex + 4)
+    float baseIndex = (rayPos.x + (spacing * rayPos.y)) * base;
+    
+    // Intervals
+    // Reference hack for smoothing? "modifierHack"
+    // We'll stick to basic geometric interval
+    float intervalStart = (cascadeIndex == 0.0) ? CASCADE_INTERVAL : (RAY_INTERVAL * CASCADE_INTERVAL * pow(base, cascadeIndex - 1.0));
+    // Usually standard RC: 
+    // L0: 0..1 (if base interval 1)
+    // L1: 1..4 (len 3? 4x?)
+    // Reference:
+    // start = interval (1.0) for L0.
+    // start = interval * 4^(L-1) for L>0.
+    // len = interval * 4^L
+    // So L0: start 1? No.
+    // Reference code:
+    // float start = cascadeIndex == 0.0 ? cascadeInterval : modifiedInterval; // modified = interval * 4^(L-1)? No ray*casc...
+    // Let's simpler logic:
+    // Level 0: 0.0 .. BASE_START
+    // Level 1: BASE_START .. BASE_START*4
+    
+    // Re-verify naive implementation logic:
+    // L0: 0 .. 2.0
+    // L1: 2.0 .. 8.0
+    
+    float rangeStart, rangeEnd;
+    if (cascadeIndex == 0.0) {
+        rangeStart = 0.0;
+        rangeEnd = 2.0; // Base Start
     } else {
-        // Interleaved gradient noise (Bayer-like pattern)
-        float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
-        noise = frac(magic.z * frac(dot(float2(DTid.xy), magic.xy)));
+        rangeStart = 2.0 * pow(4.0, cascadeIndex - 1.0);
+        rangeEnd = 2.0 * pow(4.0, cascadeIndex);
     }
     
-    float angleStep = 6.28318 / float(rayCount);
-    float3 L0 = float3(0.0, 0.0, 0.0);
-    float3 L1x = float3(0.0, 0.0, 0.0);
-    float3 L1y = float3(0.0, 0.0, 0.0);
+    // Ray Angles
+    float totalRaysInLevel = base * pow(base, cascadeIndex); // 4 * 4^L
+    // Wait, reference says `rayCount = pow(base, cascadeIndex + 1.0)`.
+    // L0: 4^1 = 4.
+    // L1: 4^2 = 16.
+    // L2: 4^3 = 64.
+    // Matches.
+    float angleStep = TAU / totalRaysInLevel;
     
-    // Loop limit must be >= baseRays * 2^maxLevel (e.g., 80 * 32 = 2560)
-    for(int r = 0; r < 512; r++) {
-        if(r >= rayCount) break;
-        
-        float angle = (float(r) + noise) * angleStep;
+    float noise = 0.0;
+    if (pc.stochasticMode != 0) {
+        noise = gold_noise(coord, pc.time + cascadeIndex * 13.0) / (totalRaysInLevel * 0.5); 
+        // Noise scaled by ray count to jitter within the conceptual "pixel cone"
+        // Reference: rand(..) / (rayCount * 0.5)
+    }
+
+    // Accumulators
+    float4 totalRadiance = float4(0.0, 0.0, 0.0, 0.0);
+    
+    // SH Accumulators (Only used for Level 0)
+    float3 shL0 = float3(0.0, 0.0, 0.0);
+    float3 shL1x = float3(0.0, 0.0, 0.0);
+    float3 shL1y = float3(0.0, 0.0, 0.0);
+    
+    float2 worldPos = probeRelativePosition * spacing; 
+    // Wait. probeRelativePosition is 0..size.
+    // size = res/spacing.
+    // So spatial position reconstruction:
+    // worldPos should be the center of the probe region? 
+    // Reference: `vec2 probeCenter = (probeRelativePosition + 0.5) * basePixelsBetweenProbes * spacing;`
+    // basePixelsBetweenProbes = 1 (usually).
+    // so `(probeRelativePosition + 0.5) * spacing`.
+    
+    // But `probeRelativePosition` is just `coord % size`.
+    // Example L1 (spacing 2). Res 800. Size 400.
+    // Pixel 0 (TopLeft). Coord 0. Rel 0. RayPos 0.
+    // Pixel 400 (Middle). Coord 400. Rel 0. RayPos 1.
+    // They both map to 'Rel 0'.
+    // Rel 0 corresponds to World Pos ?
+    // If Spacing is 2, it means we have effectively 400x400 spatial probes.
+    // They cover the screen 0..800.
+    // So Rel 0 -> World 0? Rel 1 -> World 2?
+    // Yes. `worldPos = Rel * spacing`.
+    // + offsets for centering.
+    
+    // Correct world position for raymarching:
+    // We use the pixel center of the "virtual probe".
+    float2 probeCenter = (probeRelativePosition + 0.5) * spacing;
+    
+    // Iterate BASE_RAYS (4)
+    for (int i = 0; i < BASE_RAYS; i++) {
+        float index = baseIndex + float(i);
+        float angle = (index + 0.5) * angleStep + noise;
         float2 rd = float2(cos(angle), sin(angle));
         
-        float tHit = rayMarchVis(worldPos, rd, rangeEnd);
-        if(tHit < rangeStart) continue;
-        float validEnd = min(tHit, rangeEnd);
-        
-        // Direct Light
-        float3 rayRadiance = float3(0.0, 0.0, 0.0);
-        for(int l = 0; l < pc.lightCount; l++) {
-            Light light = LightBuffer[l];
-            float val = integrateLightSegment(worldPos, rd, rangeStart, validEnd, light.pos, light.radius);
-            if(val > 0.0) rayRadiance += light.color * val;
-        }
+        // Raymarch
+        float tHit = rayMarchVis(probeCenter, rd, rangeEnd);
 
-        // Indirect Light (Bounce)
-        if(tHit < rangeEnd) {
-            float2 hitPos = worldPos + rd * tHit;
-            float2 hitUV = hitPos / pc.resolution;
+        // Calculate Radiance for this ray
+        float3 rayColor = float3(0.0, 0.0, 0.0);
+        float alpha = 0.0;
+        
+        // 1. Direct Light (Analytic) - Only if within range
+        // Note: Naive logic checked `tHit < rangeStart` continue.
+        // We should do similar.
+        
+        if (tHit >= rangeStart) {
+            float validEnd = min(tHit, rangeEnd);
             
-            if(hitUV.x > 0.0 && hitUV.x < 1.0 && hitUV.y > 0.0 && hitUV.y < 1.0) {
-                 float3 dim = float3(1.0, 1.0, 1.0); // Simple bounce attenuation
-                 
-                 // Sample SH History for Glossy Reflection using array layers
-                 float3 histL0 = HistorySH.SampleLevel(LinearSampler, float3(hitUV, 0), 0).rgb;
-                 float3 histL1x = HistorySH.SampleLevel(LinearSampler, float3(hitUV, 1), 0).rgb;
-                 float3 histL1y = HistorySH.SampleLevel(LinearSampler, float3(hitUV, 2), 0).rgb;
-                 
-                 // Reflection direction: simplistic "towards viewer" (-rd)
-                 float bounceAngle = dirToAngle(-rd);
-                 float3 bounceColor = decodeSH(bounceAngle, histL0, histL1x, histL1y);
-                 
-                 rayRadiance += bounceColor; 
-            }
-        }
-        
-        encodeSH(angle, rayRadiance, L0, L1x, L1y);
-    }
-    
-    if (rayCount > 0) {
-        float inv = 1.0 / float(rayCount);
-        L0 *= inv;
-        L1x *= inv;
-        L1y *= inv;
-    }
-        
-    // Merge with upper cascade (coarser level covers further distances)
-    // Apply edge masking to prevent blurry shadow outline from low-res upper cascades
-    if (pc.level < pc.maxLevel - 1) {
-        // Compute distance to nearest wall for GI masking
-        float minDist = 9999.0;
-        for(int i = 0; i < pc.obstacleCount; i++) {
-            Obstacle obs = ObstacleBuffer[i];
-            float d = length(worldPos - obs.pos) - obs.radius;
-            minDist = min(minDist, d);
-        }
-        float giMask = smoothstep(-5.0, 20.0, minDist);
-        
-        L0 += UpperSH.SampleLevel(LinearSampler, float3(uv, 0), 0).rgb * giMask;
-        L1x += UpperSH.SampleLevel(LinearSampler, float3(uv, 1), 0).rgb * giMask;
-        L1y += UpperSH.SampleLevel(LinearSampler, float3(uv, 2), 0).rgb * giMask;
-    }
-    
-    /*--------------------------------------------------------------------------
-        PBR WALL RENDERING (Level 0 only gets here via the cascade path
-        when showIntervals is on, but this code path is for higher levels)
-    --------------------------------------------------------------------------*/
-    float3 radiance = L0;
-    if(pc.level == 0) {
-        float minDist = 9999.0;
-        int hitID = -1;
-        
-        for(int i = 0; i < pc.obstacleCount; i++) {
-            Obstacle obs = ObstacleBuffer[i];
-            float d = length(worldPos - obs.pos) - obs.radius;
-            if(d < minDist) {
-                minDist = d;
-                hitID = i;
-            }
-        }
-        
-        float edgeWidth = 2.0;
-        float edgeFactor = 1.0 - smoothstep(-edgeWidth, edgeWidth, minDist);
-        
-        if(edgeFactor > 0.0 && hitID != -1) {
-            Obstacle obs = ObstacleBuffer[hitID];
-            float3 albedo = obs.color;
-            
-            // Simplified PBR: normal from circle center, view from top
-            float roughness = 0.6;
-            float2 centerDir = normalize(worldPos - obs.pos);
-            float3 N = normalize(float3(centerDir, 0.4));
-            float3 V = float3(0.0, 0.0, 1.0);
-            
-            float3 Lo = float3(0.0, 0.0, 0.0);
-            
+            // Check occlusion/lights
             for(int l = 0; l < pc.lightCount; l++) {
-                Light light = LightBuffer[l];
-                float3 lPos = float3(light.pos, 40.0);  // Light elevated in Z
-                float3 pixelPos3D = float3(worldPos, 0.0);
-                
-                float3 L_vec = lPos - pixelPos3D;
-                float distance = length(L_vec);
-                float3 L = normalize(L_vec);
-                float3 H = normalize(V + L);  // Half vector for specular
-                
-                float attenuation = 1.0 / (1.0 + distance * distance * 0.0003);
-                float3 radianceIn = light.color * 2.5 * attenuation;
-                
-                float NdotL = max(dot(N, L), 0.0);
-                float NdotH = max(dot(N, H), 0.0);
-                
-                // Blinn-Phong-like specular + diffuse
-                float spec = pow(NdotH, (1.0 - roughness) * 64.0);
-                Lo += (albedo * 0.7 + spec * 0.3) * radianceIn * NdotL;
+                 Light light = LightBuffer[l];
+                 
+                 // SRGB Correction: Light color is likely generic, assume Linear or convert?
+                 // Reference usually defines colors in script.
+                 // We will assume `light.color` is Linear for calculation.
+                 // (Or convert if we suspect it's sRGB).
+                 // User inputs colors 0..1. Assume sRGB.
+                 float3 linearLightColor = pow(light.color, 2.2);
+                 
+                 float val = integrateLightSegment(probeCenter, rd, rangeStart, validEnd, light.pos, light.radius);
+                 if(val > 0.0) {
+                     // Falloff
+                     float dist = distance(probeCenter, light.pos); // Approx
+                     float attenuation = 1.0 / (1.0 + dist * dist * light.falloff * 0.001);
+                     rayColor += linearLightColor * val * attenuation;
+                 }
             }
             
-            float3 ambient = radiance * albedo * 0.4;
-            float3 baseAmbient = albedo * 0.15;
-            float3 wallColor = Lo + ambient + baseAmbient;
-            radiance = lerp(radiance, wallColor, edgeFactor);
+            // 2. Indirect Hit
+            if (tHit < rangeEnd) {
+                 float2 hitPos = probeCenter + rd * tHit;
+                 // Alpha 1.0 means we hit a wall/obstacle
+                 alpha = 1.0;
+                 
+                 // Wall Albedo
+                 float3 wallAlbedo = float3(0.0, 0.0, 0.0);
+                 float minDist = 9999.0;
+                 for(int ob = 0; ob < pc.obstacleCount; ob++) {
+                     Obstacle obs = ObstacleBuffer[ob];
+                     float d = length(hitPos - obs.pos) - obs.radius;
+                     if(d < minDist) {
+                         minDist = d;
+                         wallAlbedo = pow(obs.color, 2.2); // SRGB -> Linear
+                     }
+                 }
+                 
+                 // Bounce?
+                 // Naive: Sample HistorySH.
+                 // Problem: HistorySH is correct for Previous Frame.
+                 // We can add it.
+                 // Note: We are in 'Level 0' logic or 'Level N'?
+                 // All levels can sample history for infinite bounce.
+                 
+                 // Sample History at hit uv
+                 float2 hitUV = hitPos / resolution;
+                 if(hitUV.x >= 0.0 && hitUV.x <= 1.0 && hitUV.y >= 0.0 && hitUV.y <= 1.0) {
+                     float3 histL0 = HistorySH.SampleLevel(LinearSampler, float3(hitUV, 0), 0).rgb;
+                     float3 histL1x = HistorySH.SampleLevel(LinearSampler, float3(hitUV, 1), 0).rgb;
+                     float3 histL1y = HistorySH.SampleLevel(LinearSampler, float3(hitUV, 2), 0).rgb;
+                     // Decode
+                     float bounceAngle = dirToAngle(-rd);
+                     float3 bounceColor = decodeSH(bounceAngle, histL0, histL1x, histL1y);
+                     rayColor += bounceColor * wallAlbedo;
+                 }
+            }
+        }
+        
+        float4 rayRes = float4(rayColor, alpha);
+        
+        // Merge with Upper Cascade
+        // Pass 'index' (absolute ray index) so merging finds the correct parent ray
+        float4 merged = merge(rayRes, index, probeRelativePosition, sqrtBase, cascadeIndex);
+        
+        // Accumulate Average
+        // We are averaging 4 rays.
+        totalRadiance += merged * 0.25; // 1/4
+        
+        // For Level 0: Encode SH
+        if (cascadeIndex == 0.0) {
+            // Encode the MERGED radiance into SH
+            encodeSH(angle, merged.rgb, shL0, shL1x, shL1y);
+            // Note: We are encoding 'merged.rgb' which includes light + upper bounce
         }
     }
     
-    // Debug: Visualize cascade intervals as red rings around first light
-    if(pc.showIntervals && pc.lightCount > 0) {
-         float2 lPos = LightBuffer[0].pos;
-         float d = length(worldPos - lPos);
-         if(d > rangeStart && d < rangeEnd) radiance += float3(0.1, 0.0, 0.0);
+    // OUTPUT
+    if (cascadeIndex == 0.0) {
+        // Level 0: Write SH
+        // Normalize SH by ray count (4)
+        shL0 *= 0.25;
+        shL1x *= 0.25;
+        shL1y *= 0.25;
+        
+        // Output Linear Radiance (Accumulate shader will handle blending)
+        // Note: Accumulate expects SH.
+        OutputSH[uint3(DTid.xy, 0)] = float4(shL0, 1.0);
+        OutputSH[uint3(DTid.xy, 1)] = float4(shL1x, 0.0);
+        OutputSH[uint3(DTid.xy, 2)] = float4(shL1y, 0.0);
+    } 
+    else {
+        // Level > 0: Write packed Atlas Radiance
+        // We write 'totalRadiance' (average of 4 rays) to Layer 0.
+        // The texture Coord is just DTid.xy.
+        // The data is spatially scrambled (Atlas), but consistent for reading.
+        OutputSH[uint3(DTid.xy, 0)] = totalRadiance;
+        // Layers 1, 2 unused for intermediate cascades
     }
-    
-    // Write SH coefficients to array layers
-    OutputSH[uint3(DTid.xy, 0)] = float4(L0, 1.0);
-    OutputSH[uint3(DTid.xy, 1)] = float4(L1x, 0.0);
-    OutputSH[uint3(DTid.xy, 2)] = float4(L1y, 0.0);
 }

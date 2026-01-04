@@ -1,3 +1,18 @@
+// ==============================================================================
+//     WINDSIM VISUALIZER
+//     ============================================================================
+//
+//     A Raylib-based visualizer for the WindSim fluid simulation.
+//     Handles 3D rendering, volumetrics visualization, and user interaction.
+//
+//     Key Controls:
+//     - Orbit/Zoom/Pan: Alt + Mouse or Maya-style controls
+//     - Selection: Tab to cycle volumes
+//     - Transform: Arrow keys to move, R/F/T/G/Y/H to rotate
+//
+//     Author: Nguyen Phi Hung
+// ==============================================================================
+
 const std = @import("std");
 
 const c = @cImport({
