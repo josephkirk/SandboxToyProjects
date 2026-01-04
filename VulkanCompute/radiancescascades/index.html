@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stochastic Radiance Cascades + PBR + GI</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #111; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #eee;
+            background: rgba(10, 10, 15, 0.95);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #333;
+            pointer-events: auto;
+            min-width: 260px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+            backdrop-filter: blur(8px);
+            user-select: none;
+            font-size: 0.85rem;
+        }
+        h1 { margin: 0 0 5px 0; font-size: 1.1rem; color: #4facfe; text-transform: uppercase; letter-spacing: 1px; }
+        h2 { margin: 0 0 15px 0; font-size: 0.8rem; color: #888; font-weight: normal; }
+        .control-group { margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+        input[type="range"] { width: 100px; accent-color: #4facfe; cursor: pointer; }
+        input[type="color"] { border: none; width: 30px; height: 20px; cursor: pointer; background: none; }
+        .value { font-family: monospace; color: #4facfe; margin-left: 10px; min-width: 30px; text-align: right; }
+        .instruction { font-size: 0.75rem; color: #777; margin-top: 15px; border-top: 1px solid #333; padding-top: 10px; line-height: 1.4; }
+        .section-title { font-size: 0.7rem; color: #555; text-transform: uppercase; margin-top: 10px; margin-bottom: 5px; font-weight: bold; border-bottom: 1px solid #222; }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <h1>Sparse Radiance Cascades</h1>
+        <h2>Stochastic + PBR + GI</h2>
+        
+        <div class="section-title">Brush Colors</div>
+        <div class="control-group">
+            <label>Light Color</label>
+            <input type="color" id="lightColor" value="#00aaff">
+        </div>
+        <div class="control-group">
+            <label>Wall Color</label>
+            <input type="color" id="wallColor" value="#ff4444">
+        </div>
+        <div class="control-group">
+            <label>Size</label>
+            <input type="range" id="lightRadius" min="5.0" max="80.0" value="30.0" step="1.0">
+            <span class="value" id="val_lightRadius">30.0</span>
+        </div>
+
+        <div class="section-title">Technique</div>
+        <div class="control-group">
+            <label>Stochastic Mode</label>
+            <input type="checkbox" id="stochastic" checked>
+        </div>
+        <div class="control-group">
+            <label>Blend Speed</label>
+            <input type="range" id="blendSpeed" min="0.01" max="1.0" value="0.1" step="0.01">
+            <span class="value" id="val_blendSpeed">0.1</span>
+        </div>
+
+        <div class="section-title">Sparse Config</div>
+        <div class="control-group">
+            <label>Max Cascades</label>
+            <input type="range" id="cascadeCount" min="3" max="7" value="6" step="1">
+            <span class="value" id="val_cascadeCount">6</span>
+        </div>
+        <div class="control-group">
+            <label>Base Rays</label>
+            <input type="range" id="baseRays" min="1" max="8" value="2" step="1">
+            <span class="value" id="val_baseRays">2</span>
+        </div>
+        <div class="control-group">
+            <label>Show Intervals</label>
+            <input type="checkbox" id="showIntervals">
+        </div>
+
+        <div class="instruction">
+            <strong>Controls:</strong><br>
+            <span style="color:#4facfe">Left Drag:</span> Paint Lights<br>
+            <span style="color:#ff4444">Right Drag:</span> Paint PBR Walls<br>
+            <span style="color:#f55">Middle Click:</span> Clear
+        </div>
+    </div>
+
+    <canvas id="glcanvas"></canvas>
+
+    <!-- VERTEX SHADER -->
+    <script id="vs" type="x-shader/x-vertex">#version 300 es
+        in vec4 a_position;
+        out vec2 v_uv;
+        void main() {
+            gl_Position = a_position;
+            v_uv = a_position.xy * 0.5 + 0.5;
+        }
+    </script>
+
+    <!-- CASCADE COMPUTE SHADER -->
+    <script id="fs_cascade" type="x-shader/x-fragment">#version 300 es
+        precision highp float;
+
+        out vec4 outColor;
+        in vec2 v_uv;
+
+        uniform vec2 u_resolution; 
+        uniform vec2 u_screenRes;  
+        
+        uniform sampler2D u_upperCascade;
+        uniform sampler2D u_history;   
+        uniform sampler2D u_sceneData; 
+
+        uniform int u_level;       
+        uniform int u_maxLevel;    
+        uniform int u_baseRays;
+        uniform int u_lightCount;
+        uniform int u_obstacleCount;
+        uniform bool u_showIntervals;
+        
+        uniform bool u_stochastic;
+        uniform float u_frame; 
+
+        const float BASE_START = 2.0;
+        const float PI = 3.14159265;
+
+        // --- SDF ---
+        float sdCircle(vec2 p, float r) { return length(p) - r; }
+        float sdBox(vec2 p, vec2 b) {
+            vec2 d = abs(p) - b;
+            return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+        }
+
+        float map(vec2 p) {
+            float d = -sdBox(p - u_screenRes * 0.5, u_screenRes * 0.5 - 2.0);
+            for(int i = 0; i < 4096; i++) {
+                if(i >= u_obstacleCount) break;
+                vec3 obs = texelFetch(u_sceneData, ivec2(i, 2), 0).xyz;
+                d = min(d, sdCircle(p - obs.xy, obs.z));
+            }
+            return d;
+        }
+
+        // --- LIGHTING ---
+        float integrateLightSegment(vec2 ro, vec2 rd, float tMin, float tMax, vec2 lightPos, float radius) {
+            vec2 L = lightPos - ro;
+            float tClosest = dot(L, rd); 
+            vec2 pClosest = ro + rd * tClosest;
+            float distSq = dot(pClosest - lightPos, pClosest - lightPos);
+            if(distSq > radius * radius) return 0.0;
+            float halfChord = sqrt(radius * radius - distSq);
+            float start = max(tMin, tClosest - halfChord);
+            float end = min(tMax, tClosest + halfChord);
+            if(start >= end) return 0.0;
+            float d = length(L);
+            return (end - start) / max(1.0, d/radius); 
+        }
+
+        float rayMarchVis(vec2 ro, vec2 rd, float maxDist) {
+            float t = 0.0;
+            for(int i = 0; i < 32; i++) { 
+                vec2 p = ro + rd * t;
+                float d = map(p);
+                if(d < 0.1) return t; 
+                t += d;
+                if(t >= maxDist) return maxDist; 
+            }
+            return maxDist;
+        }
+
+        float gold_noise(vec2 xy, float seed){
+           return fract(tan(distance(xy*1.61803398874989484820459, xy)*seed)*xy.x);
+        }
+
+        // --- PBR MATH ---
+        float DistributionGGX(vec3 N, vec3 H, float roughness) {
+            float a = roughness * roughness;
+            float a2 = a * a;
+            float NdotH = max(dot(N, H), 0.0);
+            float NdotH2 = NdotH * NdotH;
+            float num = a2;
+            float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+            denom = PI * denom * denom;
+            return num / max(denom, 0.0001);
+        }
+        float GeometrySchlickGGX(float NdotV, float roughness) {
+            float r = (roughness + 1.0);
+            float k = (r*r) / 8.0;
+            float num = NdotV;
+            float denom = NdotV * (1.0 - k) + k;
+            return num / max(denom, 0.0001);
+        }
+        float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+            float NdotV = max(dot(N, V), 0.0);
+            float NdotL = max(dot(N, L), 0.0);
+            float ggx2 = GeometrySchlickGGX(NdotV, roughness);
+            float ggx1 = GeometrySchlickGGX(NdotL, roughness);
+            return ggx1 * ggx2;
+        }
+        vec3 FresnelSchlick(float cosTheta, vec3 F0) {
+            return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+        }
+
+        void main() {
+            vec2 worldPos = v_uv * u_screenRes;
+            
+            float rangeStart = (u_level == 0) ? 0.0 : BASE_START * pow(4.0, float(u_level) - 1.0);
+            if(u_level == 0) rangeStart = 0.0; else if(u_level == 1) rangeStart = BASE_START;
+            float rangeEnd = BASE_START * pow(4.0, float(u_level));
+            
+            float rayCountF = float(u_baseRays) * pow(2.0, float(u_level));
+            int rayCount = int(rayCountF);
+            
+            float noise = 0.5; 
+            if(u_stochastic) noise = gold_noise(gl_FragCoord.xy, u_frame + float(u_level) * 13.0);
+            else {
+                vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
+                noise = fract(magic.z * fract(dot(gl_FragCoord.xy, magic.xy))); 
+            }
+
+            float angleStep = 6.28318 / float(rayCount);
+            vec3 radiance = vec3(0.0);
+            
+            // --- RC & GI LOOP ---
+            for(int r = 0; r < 512; r++) {
+                if(r >= rayCount) break;
+                float angle = (float(r) + noise) * angleStep;
+                vec2 rd = vec2(cos(angle), sin(angle));
+                
+                float tHit = rayMarchVis(worldPos, rd, rangeEnd);
+                if(tHit < rangeStart) continue; 
+                float validEnd = min(tHit, rangeEnd);
+                
+                // 1. Direct Lighting (Analytic)
+                for(int l = 0; l < 256; l++) {
+                    if(l >= u_lightCount) break;
+                    vec3 lDat = texelFetch(u_sceneData, ivec2(l, 0), 0).xyz;
+                    vec3 lCol = texelFetch(u_sceneData, ivec2(l, 1), 0).rgb;
+                    float val = integrateLightSegment(worldPos, rd, rangeStart, validEnd, lDat.xy, lDat.z);
+                    if(val > 0.0) radiance += lCol * val;
+                }
+
+                // 2. Indirect Lighting (Bounce from History)
+                if(tHit < rangeEnd) {
+                    vec2 hitPos = worldPos + rd * tHit;
+                    vec2 hitUV = hitPos / u_screenRes;
+                    
+                    if(hitUV.x > 0.0 && hitUV.x < 1.0 && hitUV.y > 0.0 && hitUV.y < 1.0) {
+                        vec3 bounceColor = texture(u_history, hitUV).rgb;
+                        radiance += bounceColor; 
+                    }
+                }
+            }
+            
+            radiance /= float(rayCount); 
+            
+            // Merge Upper Cascade
+            if(u_level < u_maxLevel - 1) {
+                radiance += texture(u_upperCascade, v_uv).rgb;
+            }
+            
+            // --- WALL MATERIAL & PBR (Only Level 0) ---
+            if(u_level == 0) {
+                int hitID = -1;
+                // Check if inside any wall
+                for(int i = 0; i < 4096; i++) {
+                    if(i >= u_obstacleCount) break;
+                    vec3 obs = texelFetch(u_sceneData, ivec2(i, 2), 0).xyz;
+                    float d = length(worldPos - obs.xy) - obs.z;
+                    if(d < 0.0) {
+                        hitID = i;
+                        break; 
+                    }
+                }
+
+                if(hitID != -1) {
+                    vec3 obs = texelFetch(u_sceneData, ivec2(hitID, 2), 0).xyz;
+                    vec3 albedo = texelFetch(u_sceneData, ivec2(hitID, 3), 0).rgb;
+                    
+                    float roughness = 0.5;
+                    float metallic = 0.0;
+                    vec3 F0 = vec3(0.04); 
+                    F0 = mix(F0, albedo, metallic);
+
+                    vec2 centerDir = normalize(worldPos - obs.xy);
+                    vec3 N = normalize(vec3(centerDir, 0.5));
+                    vec3 V = vec3(0.0, 0.0, 1.0); 
+
+                    vec3 Lo = vec3(0.0);
+
+                    for(int l = 0; l < 256; l++) {
+                        if(l >= u_lightCount) break;
+                        vec3 lPos = texelFetch(u_sceneData, ivec2(l, 0), 0).xyz;
+                        vec3 lColor = texelFetch(u_sceneData, ivec2(l, 1), 0).rgb * 2.0; 
+
+                        vec3 lightPos3D = vec3(lPos.xy, 50.0);
+                        vec3 pixelPos3D = vec3(worldPos, 0.0);
+                        
+                        vec3 L_vec = lightPos3D - pixelPos3D;
+                        float distance = length(L_vec);
+                        vec3 L = normalize(L_vec);
+                        vec3 H = normalize(V + L);
+
+                        float attenuation = 1.0 / (1.0 + distance * distance * 0.0005);
+                        vec3 radianceIn = lColor * attenuation;
+
+                        float NDF = DistributionGGX(N, H, roughness);
+                        float G = GeometrySmith(N, V, L, roughness);
+                        vec3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
+
+                        vec3 numerator = NDF * G * F;
+                        float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
+                        vec3 specular = numerator / denominator;
+
+                        vec3 kS = F;
+                        vec3 kD = vec3(1.0) - kS;
+                        kD *= 1.0 - metallic;
+
+                        float NdotL = max(dot(N, L), 0.0);
+                        Lo += (kD * albedo / PI + specular) * radianceIn * NdotL;
+                    }
+                    
+                    radiance = Lo + vec3(0.03) * albedo; 
+                }
+            }
+
+            if(u_showIntervals && u_lightCount > 0) {
+                 vec3 lDat = texelFetch(u_sceneData, ivec2(0, 0), 0).xyz;
+                 float d = length(worldPos - lDat.xy);
+                 if(d > rangeStart && d < rangeEnd) radiance += vec3(0.1, 0.0, 0.0);
+            }
+
+            outColor = vec4(radiance, 1.0);
+        }
+    </script>
+
+    <!-- ACCUMULATION SHADER -->
+    <script id="fs_accum" type="x-shader/x-fragment">#version 300 es
+        precision highp float;
+        in vec2 v_uv;
+        out vec4 outColor;
+        
+        uniform sampler2D u_current;
+        uniform sampler2D u_history;
+        uniform float u_blend; 
+        
+        void main() {
+            vec3 cur = texture(u_current, v_uv).rgb;
+            vec3 hist = texture(u_history, v_uv).rgb;
+            vec3 res = mix(hist, cur, u_blend);
+            outColor = vec4(res, 1.0);
+        }
+    </script>
+
+    <!-- DISPLAY SHADER -->
+    <script id="fs_display" type="x-shader/x-fragment">#version 300 es
+        precision highp float;
+        in vec2 v_uv;
+        out vec4 outColor;
+        uniform sampler2D u_tex; 
+
+        void main() {
+            vec3 col = texture(u_tex, v_uv).rgb;
+            col = col / (col + 1.0); // Tone mapping
+            col = pow(col, vec3(1.0/2.2));
+            outColor = vec4(col, 1.0);
+        }
+    </script>
+
+    <script>
+        const canvas = document.getElementById('glcanvas');
+        const gl = canvas.getContext('webgl2', { antialias: false });
+        if (!gl) alert('WebGL 2 needed');
+        const ext = gl.getExtension('EXT_color_buffer_float');
+
+        function createProgram(vsSrc, fsSrc) {
+            const vs = gl.createShader(gl.VERTEX_SHADER);
+            gl.shaderSource(vs, vsSrc); gl.compileShader(vs);
+            if(!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(vs));
+            const fs = gl.createShader(gl.FRAGMENT_SHADER);
+            gl.shaderSource(fs, fsSrc); gl.compileShader(fs);
+            if(!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(fs));
+            const p = gl.createProgram();
+            gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p);
+            return p;
+        }
+
+        const vsSource = document.getElementById('vs').text.trim();
+        const fsCascadeSrc = document.getElementById('fs_cascade').text.trim();
+        const fsAccumSrc = document.getElementById('fs_accum').text.trim();
+        const fsDisplaySrc = document.getElementById('fs_display').text.trim();
+
+        const progCascade = createProgram(vsSource, fsCascadeSrc);
+        const progAccum = createProgram(vsSource, fsAccumSrc);
+        const progDisplay = createProgram(vsSource, fsDisplaySrc);
+
+        const buf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+        const state = {
+            lights: [{x: window.innerWidth/2, y: window.innerHeight/2, r: 30, color: [0.0, 0.6, 1.0]}],
+            obstacles: [],
+            drawing: null, lastPos: {x:0,y:0},
+            frame: 0
+        };
+
+        const ui = {
+            cascadeCount: document.getElementById('cascadeCount'),
+            baseRays: document.getElementById('baseRays'),
+            lightColor: document.getElementById('lightColor'),
+            wallColor: document.getElementById('wallColor'),
+            lightRadius: document.getElementById('lightRadius'),
+            showIntervals: document.getElementById('showIntervals'),
+            stochastic: document.getElementById('stochastic'),
+            blendSpeed: document.getElementById('blendSpeed')
+        };
+        
+        function hexToRgb(hex) {
+            const r = parseInt(hex.substr(1, 2), 16) / 255;
+            const g = parseInt(hex.substr(3, 2), 16) / 255;
+            const b = parseInt(hex.substr(5, 2), 16) / 255;
+            return [r, g, b];
+        }
+
+        function updateVal(id, val) { document.getElementById('val_'+id).innerText = val; }
+        
+        ui.cascadeCount.oninput = (e) => { updateVal('cascadeCount', e.target.value); initFBOs(); };
+        ui.baseRays.oninput = (e) => updateVal('baseRays', e.target.value);
+        ui.lightRadius.oninput = (e) => updateVal('lightRadius', e.target.value);
+        ui.blendSpeed.oninput = (e) => updateVal('blendSpeed', e.target.value);
+
+        let cascades = []; 
+        let accumFBOs = []; 
+        let accumIdx = 0;
+
+        function initFBOs() {
+            cascades.forEach(c => { gl.deleteFramebuffer(c.fbo); gl.deleteTexture(c.tex); });
+            cascades = [];
+            accumFBOs.forEach(c => { gl.deleteFramebuffer(c.fbo); gl.deleteTexture(c.tex); });
+            accumFBOs = [];
+
+            const count = parseInt(ui.cascadeCount.value);
+            let w = canvas.width;
+            let h = canvas.height;
+
+            for(let i=0; i<count; i++) {
+                const tex = gl.createTexture();
+                gl.bindTexture(gl.TEXTURE_2D, tex);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.FLOAT, null);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                const fbo = gl.createFramebuffer();
+                gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+                cascades.push({ fbo, tex, w, h });
+                w = Math.max(1, Math.floor(w / 2));
+                h = Math.max(1, Math.floor(h / 2));
+            }
+
+            for(let i=0; i<2; i++) {
+                const tex = gl.createTexture();
+                gl.bindTexture(gl.TEXTURE_2D, tex);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, canvas.width, canvas.height, 0, gl.RGBA, gl.FLOAT, null);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                const fbo = gl.createFramebuffer();
+                gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+                accumFBOs.push({ fbo, tex });
+            }
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        }
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            initFBOs();
+        });
+        initFBOs();
+
+        // --- DATA TEXTURE (4 ROWS) ---
+        const sceneDataArray = new Float32Array(4096 * 4 * 4); // 4 Rows
+        const sceneTex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 4096, 4, 0, gl.RGBA, gl.FLOAT, sceneDataArray);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+        function updateSceneTexture() {
+            // Row 0: Lights Pos/Rad
+            for(let i=0; i<state.lights.length; i++) {
+                const idx = i * 4;
+                sceneDataArray[idx] = state.lights[i].x;
+                sceneDataArray[idx+1] = state.lights[i].y;
+                sceneDataArray[idx+2] = state.lights[i].r;
+            }
+            // Row 1: Lights Color
+            const off1 = 4096*4;
+            for(let i=0; i<state.lights.length; i++) {
+                const idx = off1 + i * 4;
+                sceneDataArray[idx] = state.lights[i].color[0];
+                sceneDataArray[idx+1] = state.lights[i].color[1];
+                sceneDataArray[idx+2] = state.lights[i].color[2];
+            }
+            // Row 2: Obstacles Pos/Rad
+            const off2 = 4096*4*2;
+            for(let i=0; i<state.obstacles.length; i++) {
+                const idx = off2 + i * 4;
+                sceneDataArray[idx] = state.obstacles[i].x;
+                sceneDataArray[idx+1] = state.obstacles[i].y;
+                sceneDataArray[idx+2] = state.obstacles[i].r;
+            }
+            // Row 3: Obstacles Color (Material)
+            const off3 = 4096*4*3;
+            for(let i=0; i<state.obstacles.length; i++) {
+                const idx = off3 + i * 4;
+                sceneDataArray[idx] = state.obstacles[i].color[0];
+                sceneDataArray[idx+1] = state.obstacles[i].color[1];
+                sceneDataArray[idx+2] = state.obstacles[i].color[2];
+            }
+            gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 4096, 4, gl.RGBA, gl.FLOAT, sceneDataArray);
+        }
+
+        // --- CLEAR HISTORY FUNCTION ---
+        function clearHistory() {
+            accumFBOs.forEach(obj => {
+                gl.bindFramebuffer(gl.FRAMEBUFFER, obj.fbo);
+                gl.clearColor(0, 0, 0, 0);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+            });
+            cascades.forEach(c => {
+                gl.bindFramebuffer(gl.FRAMEBUFFER, c.fbo);
+                gl.clearColor(0, 0, 0, 0);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+            });
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        }
+
+        function getPos(e) {
+            const r = canvas.getBoundingClientRect();
+            return {x: e.clientX - r.left, y: canvas.height - (e.clientY - r.top)};
+        }
+        canvas.addEventListener('mousedown', e => {
+            const p = getPos(e);
+            if(e.button===0) { state.drawing='l'; addLight(p.x,p.y); }
+            if(e.button===2) { state.drawing='w'; addWall(p.x,p.y); }
+            if(e.button===1) { 
+                state.lights=[]; 
+                state.obstacles=[]; 
+                clearHistory(); // <--- CALL CLEAR HERE
+            }
+            state.lastPos = p;
+        });
+        window.addEventListener('mouseup',()=>state.drawing=null);
+        canvas.addEventListener('mousemove', e => {
+            if(!state.drawing) return;
+            const p = getPos(e);
+            const dx=p.x-state.lastPos.x, dy=p.y-state.lastPos.y;
+            if(dx*dx+dy*dy>400) {
+                if(state.drawing==='l') addLight(p.x,p.y);
+                if(state.drawing==='w') addWall(p.x,p.y);
+                state.lastPos = p;
+            }
+        });
+        canvas.addEventListener('contextmenu', e=>e.preventDefault());
+
+        function addLight(x,y) {
+            state.lights.push({x,y, r: parseFloat(ui.lightRadius.value), color: hexToRgb(ui.lightColor.value)});
+        }
+        function addWall(x,y) {
+            state.obstacles.push({x,y, r: 20+Math.random()*10, color: hexToRgb(ui.wallColor.value)});
+        }
+
+        function render() {
+            state.frame++;
+            updateSceneTexture();
+
+            const maxLvl = cascades.length;
+            gl.useProgram(progCascade);
+
+            gl.uniform2f(gl.getUniformLocation(progCascade, 'u_screenRes'), canvas.width, canvas.height);
+            gl.uniform1i(gl.getUniformLocation(progCascade, 'u_maxLevel'), maxLvl);
+            gl.uniform1i(gl.getUniformLocation(progCascade, 'u_baseRays'), parseInt(ui.baseRays.value));
+            gl.uniform1i(gl.getUniformLocation(progCascade, 'u_lightCount'), state.lights.length);
+            gl.uniform1i(gl.getUniformLocation(progCascade, 'u_obstacleCount'), state.obstacles.length);
+            gl.uniform1i(gl.getUniformLocation(progCascade, 'u_showIntervals'), ui.showIntervals.checked?1:0);
+            
+            gl.uniform1i(gl.getUniformLocation(progCascade, 'u_stochastic'), ui.stochastic.checked?1:0);
+            gl.uniform1f(gl.getUniformLocation(progCascade, 'u_frame'), state.frame);
+
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+            gl.uniform1i(gl.getUniformLocation(progCascade, 'u_sceneData'), 1);
+            
+            const posLoc = gl.getAttribLocation(progCascade, 'a_position');
+            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+            gl.enableVertexAttribArray(posLoc);
+            gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+            // BIND HISTORY TEXTURE HERE FOR GI BOUNCE
+            const writeAcc = accumFBOs[accumIdx];
+            const readAcc = accumFBOs[1 - accumIdx];
+            
+            gl.activeTexture(gl.TEXTURE2);
+            gl.bindTexture(gl.TEXTURE_2D, readAcc.tex);
+            gl.uniform1i(gl.getUniformLocation(progCascade, 'u_history'), 2);
+
+            for(let i = maxLvl - 1; i >= 0; i--) {
+                const c = cascades[i];
+                gl.bindFramebuffer(gl.FRAMEBUFFER, c.fbo);
+                gl.viewport(0, 0, c.w, c.h);
+                gl.uniform2f(gl.getUniformLocation(progCascade, 'u_resolution'), c.w, c.h);
+                gl.uniform1i(gl.getUniformLocation(progCascade, 'u_level'), i);
+
+                if(i < maxLvl - 1) {
+                    gl.activeTexture(gl.TEXTURE0);
+                    gl.bindTexture(gl.TEXTURE_2D, cascades[i+1].tex);
+                    gl.uniform1i(gl.getUniformLocation(progCascade, 'u_upperCascade'), 0);
+                }
+                gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+            }
+
+            // Accumulate
+            accumIdx = 1 - accumIdx; // Swap
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, writeAcc.fbo);
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            gl.useProgram(progAccum);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, cascades[0].tex); 
+            gl.uniform1i(gl.getUniformLocation(progAccum, 'u_current'), 0);
+
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, readAcc.tex);
+            gl.uniform1i(gl.getUniformLocation(progAccum, 'u_history'), 1);
+            
+            const blend = ui.stochastic.checked ? parseFloat(ui.blendSpeed.value) : 1.0;
+            gl.uniform1f(gl.getUniformLocation(progAccum, 'u_blend'), blend);
+
+            const posLocAcc = gl.getAttribLocation(progAccum, 'a_position');
+            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+            gl.enableVertexAttribArray(posLocAcc);
+            gl.vertexAttribPointer(posLocAcc, 2, gl.FLOAT, false, 0, 0);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+            // Display
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            gl.useProgram(progDisplay);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, writeAcc.tex); 
+            gl.uniform1i(gl.getUniformLocation(progDisplay, 'u_tex'), 0);
+
+            const posLocDis = gl.getAttribLocation(progDisplay, 'a_position');
+            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+            gl.enableVertexAttribArray(posLocDis);
+            gl.vertexAttribPointer(posLocDis, 2, gl.FLOAT, false, 0, 0);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+            requestAnimationFrame(render);
+        }
+        render();
+
+    </script>
+</body>
+</html>

@@ -255,35 +255,18 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     // The 'index' in the loop will range [baseIndex, baseIndex + 4)
     float baseIndex = (rayPos.x + (spacing * rayPos.y)) * base;
     
-    // Intervals
-    // Reference hack for smoothing? "modifierHack"
-    // We'll stick to basic geometric interval
-    float intervalStart = (cascadeIndex == 0.0) ? CASCADE_INTERVAL : (RAY_INTERVAL * CASCADE_INTERVAL * pow(base, cascadeIndex - 1.0));
-    // Usually standard RC: 
-    // L0: 0..1 (if base interval 1)
-    // L1: 1..4 (len 3? 4x?)
-    // Reference:
-    // start = interval (1.0) for L0.
-    // start = interval * 4^(L-1) for L>0.
-    // len = interval * 4^L
-    // So L0: start 1? No.
-    // Reference code:
-    // float start = cascadeIndex == 0.0 ? cascadeInterval : modifiedInterval; // modified = interval * 4^(L-1)? No ray*casc...
-    // Let's simpler logic:
-    // Level 0: 0.0 .. BASE_START
-    // Level 1: BASE_START .. BASE_START*4
-    
-    // Re-verify naive implementation logic:
-    // L0: 0 .. 2.0
+    // Interval Logic
+    // We use a geometric progression for ray distance ranges to ensure full coverage
+    // L0: 0.0 .. 2.0
     // L1: 2.0 .. 8.0
-    
+    // L2: 8.0 .. 32.0 (and so on, doubling distance each time in this config)
     float rangeStart, rangeEnd;
     if (cascadeIndex == 0.0) {
         rangeStart = 0.0;
-        rangeEnd = 2.0; // Base Start
+        rangeEnd = 2.0 * CASCADE_INTERVAL; 
     } else {
-        rangeStart = 2.0 * pow(4.0, cascadeIndex - 1.0);
-        rangeEnd = 2.0 * pow(4.0, cascadeIndex);
+        rangeStart = 2.0 * CASCADE_INTERVAL * pow(4.0, cascadeIndex - 1.0);
+        rangeEnd = 2.0 * CASCADE_INTERVAL * pow(4.0, cascadeIndex);
     }
     
     // Ray Angles

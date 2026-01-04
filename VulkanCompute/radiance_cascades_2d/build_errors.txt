@@ -1,0 +1,35 @@
+install
++- install ZigVulkanCompute_RadianceCascades
+   +- compile exe ZigVulkanCompute_RadianceCascades Debug native 6 errors
+error: lld-link: undefined symbol: __declspec(dllimport) GetDeviceCaps
+    note: referenced by G:\Projects\SandboxDev\VulkanCompute\cimgui\dcimgui\backends\imgui_impl_win32.cpp:911
+    note:               .zig-cache\o\1ad993a1a6b393856d9355662e28b4b2\imgui_impl_win32.obj:(ImGui_ImplWin32_GetDpiScaleForMonitor(void*))
+    note: referenced by G:\Projects\SandboxDev\VulkanCompute\cimgui\dcimgui\backends\imgui_impl_win32.cpp:912
+    note:               .zig-cache\o\1ad993a1a6b393856d9355662e28b4b2\imgui_impl_win32.obj:(ImGui_ImplWin32_GetDpiScaleForMonitor(void*))
+error: lld-link: undefined symbol: __declspec(dllimport) DwmIsCompositionEnabled
+    note: referenced by G:\Projects\SandboxDev\VulkanCompute\cimgui\dcimgui\backends\imgui_impl_win32.cpp:942
+    note:               .zig-cache\o\1ad993a1a6b393856d9355662e28b4b2\imgui_impl_win32.obj:(ImGui_ImplWin32_EnableAlphaCompositing(void*))
+error: lld-link: undefined symbol: __declspec(dllimport) DwmGetColorizationColor
+    note: referenced by G:\Projects\SandboxDev\VulkanCompute\cimgui\dcimgui\backends\imgui_impl_win32.cpp:947
+    note:               .zig-cache\o\1ad993a1a6b393856d9355662e28b4b2\imgui_impl_win32.obj:(ImGui_ImplWin32_EnableAlphaCompositing(void*))
+error: lld-link: undefined symbol: __declspec(dllimport) CreateRectRgn
+    note: referenced by G:\Projects\SandboxDev\VulkanCompute\cimgui\dcimgui\backends\imgui_impl_win32.cpp:949
+    note:               .zig-cache\o\1ad993a1a6b393856d9355662e28b4b2\imgui_impl_win32.obj:(ImGui_ImplWin32_EnableAlphaCompositing(void*))
+error: lld-link: undefined symbol: __declspec(dllimport) DwmEnableBlurBehindWindow
+    note: referenced by G:\Projects\SandboxDev\VulkanCompute\cimgui\dcimgui\backends\imgui_impl_win32.cpp:954
+    note:               .zig-cache\o\1ad993a1a6b393856d9355662e28b4b2\imgui_impl_win32.obj:(ImGui_ImplWin32_EnableAlphaCompositing(void*))
+    note: referenced by G:\Projects\SandboxDev\VulkanCompute\cimgui\dcimgui\backends\imgui_impl_win32.cpp:961
+    note:               .zig-cache\o\1ad993a1a6b393856d9355662e28b4b2\imgui_impl_win32.obj:(ImGui_ImplWin32_EnableAlphaCompositing(void*))
+error: lld-link: undefined symbol: __declspec(dllimport) DeleteObject
+    note: referenced by G:\Projects\SandboxDev\VulkanCompute\cimgui\dcimgui\backends\imgui_impl_win32.cpp:955
+    note:               .zig-cache\o\1ad993a1a6b393856d9355662e28b4b2\imgui_impl_win32.obj:(ImGui_ImplWin32_EnableAlphaCompositing(void*))
+error: the following command failed with 6 compilation errors:
+"C:\\Users\\nguye\\scoop\\apps\\zig\\0.15.2\\zig.exe" build-exe -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\imgui.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\imgui_demo.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\imgui_draw.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\imgui_tables.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\imgui_widgets.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\dcimgui.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\backends\\imgui_impl_vulkan.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\backends\\imgui_impl_win32.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\backends\\dcimgui_impl_vulkan.cpp" -cflags -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES -- "G:\\Projects\\SandboxDev\\VulkanCompute\\cimgui\\dcimgui\\backends\\dcimgui_impl_win32.cpp" -lvulkan-1 -ODebug -I "C:\\VulkanSDK\\1.4.335.0\\Include" -I "G:\\Projects\\SandboxDev\\VulkanCompute\\radiance_cascades_2d\\..\\cimgui\\dcimgui" -I "G:\\Projects\\SandboxDev\\VulkanCompute\\radiance_cascades_2d\\..\\cimgui\\dcimgui\\backends" -I "G:\\Projects\\SandboxDev\\VulkanCompute\\radiance_cascades_2d\\..\\cimgui\\dcimgui" -I "G:\\Projects\\SandboxDev\\VulkanCompute\\radiance_cascades_2d\\..\\cimgui\\dcimgui\\backends" -L "C:\\VulkanSDK\\1.4.335.0\\Lib" --dep vulkan_window --dep vulkan_compute "-Mroot=G:\\Projects\\SandboxDev\\VulkanCompute\\radiance_cascades_2d\\main.zig" -ODebug -I "C:\\VulkanSDK\\1.4.335.0\\Include" "-Mvulkan_window=G:\\Projects\\SandboxDev\\VulkanCompute\\vulkan\\vulkan_window.zig" -ODebug -I "C:\\VulkanSDK\\1.4.335.0\\Include" "-Mvulkan_compute=G:\\Projects\\SandboxDev\\VulkanCompute\\vulkan\\vulkan_compute.zig" -lc++ -lc --cache-dir .zig-cache --global-cache-dir "C:\\Users\\nguye\\AppData\\Local\\zig" --name ZigVulkanCompute_RadianceCascades --zig-lib-dir "C:\\Users\\nguye\\scoop\\apps\\zig\\0.15.2\\lib\\" --listen=-
+
+Build Summary: 0/3 steps succeeded; 1 failed
+install transitive failure
++- install ZigVulkanCompute_RadianceCascades transitive failure
+   +- compile exe ZigVulkanCompute_RadianceCascades Debug native 6 errors
+
+error: the following build command failed with exit code 1:
+.zig-cache\o\10df3100c77af00f9f2836b9eeaca61e\build.exe C:\Users\nguye\scoop\apps\zig\0.15.2\zig.exe C:\Users\nguye\scoop\apps\zig\0.15.2\lib G:\Projects\SandboxDev\VulkanCompute\radiance_cascades_2d .zig-cache C:\Users\nguye\AppData\Local\zig --seed 0xc0b50e93 -Z07524edd649c7e93

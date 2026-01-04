@@ -1,0 +1,19 @@
+install
++- install nbody-viewer
+   +- compile exe nbody-viewer ReleaseFast native 2 errors
+error: lld-link: undefined symbol: _fltused
+    note: referenced by nbody_simulation.lib(nbody_simulation-bcba243c299c3a09.nbody_simulation.f3ebb6bacb146544-cgu.12.rcgu.o)
+    note: referenced by nbody_simulation.lib(nbody_simulation-bcba243c299c3a09.nbody_simulation.f3ebb6bacb146544-cgu.14.rcgu.o)
+    note: referenced by nbody_simulation.lib(nbody_simulation-bcba243c299c3a09.nbody_simulation.f3ebb6bacb146544-cgu.06.rcgu.o)
+error: lld-link: undefined symbol: const type_info::`vftable'
+    note: referenced by nbody_simulation.lib(std-fd6defcad76eabd8.std.738e1010a39bc4a5-cgu.0.rcgu.o):(__rustc::__rust_panic_type_info)
+error: the following command failed with 2 compilation errors:
+"C:\\Users\\nguye\\scoop\\apps\\zig\\0.15.2\\zig.exe" build-exe -lraylib -lnbody_simulation -lwinmm -lgdi32 -luser32 -lshell32 -lopengl32 -ladvapi32 -lws2_32 -luserenv -lbcrypt -lntdll -OReleaseFast -I "G:\\Projects\\SandboxDev\\NBody\\viewer\\..\\..\\thirdparties\\raylib-5.5_win64_msvc16\\include" -L "G:\\Projects\\SandboxDev\\thirdparties\\raylib-5.5_win64_msvc16\\lib" -L "G:\\Projects\\SandboxDev\\NBody\\simulation\\target\\release" "-Mroot=G:\\Projects\\SandboxDev\\NBody\\viewer\\src\\main.zig" -lc++ -lc --cache-dir .zig-cache --global-cache-dir "C:\\Users\\nguye\\AppData\\Local\\zig" --name nbody-viewer --zig-lib-dir "C:\\Users\\nguye\\scoop\\apps\\zig\\0.15.2\\lib\\" --listen=-
+
+Build Summary: 1/4 steps succeeded; 1 failed
+install transitive failure
++- install nbody-viewer transitive failure
+   +- compile exe nbody-viewer ReleaseFast native 2 errors
+
+error: the following build command failed with exit code 1:
+.zig-cache\o\601a207bc86e1e86cea277cbe18c2fa1\build.exe C:\Users\nguye\scoop\apps\zig\0.15.2\zig.exe C:\Users\nguye\scoop\apps\zig\0.15.2\lib G:\Projects\SandboxDev\NBody\viewer .zig-cache C:\Users\nguye\AppData\Local\zig --seed 0x46fed427 -Z8e78b1aaaf7b84f5 -Doptimize=ReleaseFast

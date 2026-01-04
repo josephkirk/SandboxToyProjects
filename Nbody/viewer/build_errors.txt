@@ -1,0 +1,21 @@
+install
++- install nbody-viewer
+   +- compile exe nbody-viewer ReleaseFast native 2 errors
+error: lld-link: undefined symbol: Simulation_GetUseRayon
+    note: referenced by C:\Users\nguye\scoop\apps\zig\0.15.2\lib\std\start.zig:602
+    note:               .zig-cache\o\114c16c008793159a9c663c0532fc83a\nbody-viewer_zcu.obj:(main)
+    note: referenced by C:\Users\nguye\scoop\apps\zig\0.15.2\lib\std\start.zig:602
+    note:               .zig-cache\o\114c16c008793159a9c663c0532fc83a\nbody-viewer_zcu.obj:(main)
+error: lld-link: undefined symbol: Simulation_SetUseRayon
+    note: referenced by C:\Users\nguye\scoop\apps\zig\0.15.2\lib\std\start.zig:602
+    note:               .zig-cache\o\114c16c008793159a9c663c0532fc83a\nbody-viewer_zcu.obj:(main)
+error: the following command failed with 2 compilation errors:
+"C:\\Users\\nguye\\scoop\\apps\\zig\\0.15.2\\zig.exe" build-exe -lraylib -lnbody_simulation -lwinmm -lgdi32 -luser32 -lshell32 -lopengl32 -ladvapi32 -lws2_32 -luserenv -lbcrypt -lntdll -OReleaseFast -I "G:\\Projects\\SandboxDev\\NBody\\viewer\\..\\..\\thirdparties\\raylib-5.5_win64_msvc16\\include" -L "G:\\Projects\\SandboxDev\\thirdparties\\raylib-5.5_win64_msvc16\\lib" -L "G:\\Projects\\SandboxDev\\NBody\\simulation\\target\\x86_64-pc-windows-gnu\\release" "-Mroot=G:\\Projects\\SandboxDev\\NBody\\viewer\\src\\main.zig" -lc++ -lc --cache-dir .zig-cache --global-cache-dir "C:\\Users\\nguye\\AppData\\Local\\zig" --name nbody-viewer --zig-lib-dir "C:\\Users\\nguye\\scoop\\apps\\zig\\0.15.2\\lib\\" --listen=-
+
+Build Summary: 1/4 steps succeeded; 1 failed
+install transitive failure
++- install nbody-viewer transitive failure
+   +- compile exe nbody-viewer ReleaseFast native 2 errors
+
+error: the following build command failed with exit code 1:
+.zig-cache\o\5e73d41b807ab7c3a7270a7562b063f9\build.exe C:\Users\nguye\scoop\apps\zig\0.15.2\zig.exe C:\Users\nguye\scoop\apps\zig\0.15.2\lib G:\Projects\SandboxDev\NBody\viewer .zig-cache C:\Users\nguye\AppData\Local\zig --seed 0x4b182cb4 -Z26034aec98465b96 -Doptimize=ReleaseFast

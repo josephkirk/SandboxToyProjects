@@ -1,0 +1,28 @@
+install
++- install nbody-viewer
+   +- compile exe nbody-viewer ReleaseFast native failure
+error: error: unable to find dynamic system library 'msvcrt' using strategy 'paths_first'. searched paths:
+  G:\Projects\SandboxDev\thirdparties\raylib-5.5_win64_msvc16\lib\msvcrt.dll
+  G:\Projects\SandboxDev\thirdparties\raylib-5.5_win64_msvc16\lib\msvcrt.lib
+  G:\Projects\SandboxDev\thirdparties\raylib-5.5_win64_msvc16\lib\libmsvcrt.a
+  G:\Projects\SandboxDev\NBody\simulation\target\release\msvcrt.dll
+  G:\Projects\SandboxDev\NBody\simulation\target\release\msvcrt.lib
+  G:\Projects\SandboxDev\NBody\simulation\target\release\libmsvcrt.a
+error: unable to find dynamic system library 'vcruntime' using strategy 'paths_first'. searched paths:
+  G:\Projects\SandboxDev\thirdparties\raylib-5.5_win64_msvc16\lib\vcruntime.dll
+  G:\Projects\SandboxDev\thirdparties\raylib-5.5_win64_msvc16\lib\vcruntime.lib
+  G:\Projects\SandboxDev\thirdparties\raylib-5.5_win64_msvc16\lib\libvcruntime.a
+  G:\Projects\SandboxDev\NBody\simulation\target\release\vcruntime.dll
+  G:\Projects\SandboxDev\NBody\simulation\target\release\vcruntime.lib
+  G:\Projects\SandboxDev\NBody\simulation\target\release\libvcruntime.a
+
+error: the following command exited with error code 1:
+"C:\\Users\\nguye\\scoop\\apps\\zig\\0.15.2\\zig.exe" build-exe -lraylib -lnbody_simulation -lwinmm -lgdi32 -luser32 -lshell32 -lopengl32 -ladvapi32 -lws2_32 -luserenv -lbcrypt -lntdll -lmsvcrt -lvcruntime -OReleaseFast -I "G:\\Projects\\SandboxDev\\NBody\\viewer\\..\\..\\thirdparties\\raylib-5.5_win64_msvc16\\include" -L "G:\\Projects\\SandboxDev\\thirdparties\\raylib-5.5_win64_msvc16\\lib" -L "G:\\Projects\\SandboxDev\\NBody\\simulation\\target\\release" "-Mroot=G:\\Projects\\SandboxDev\\NBody\\viewer\\src\\main.zig" -lc++ -lc --cache-dir .zig-cache --global-cache-dir "C:\\Users\\nguye\\AppData\\Local\\zig" --name nbody-viewer --zig-lib-dir "C:\\Users\\nguye\\scoop\\apps\\zig\\0.15.2\\lib\\" --listen=-
+
+Build Summary: 1/4 steps succeeded; 1 failed
+install transitive failure
++- install nbody-viewer transitive failure
+   +- compile exe nbody-viewer ReleaseFast native failure
+
+error: the following build command failed with exit code 1:
+.zig-cache\o\297dc72577a7389cc00116b093351899\build.exe C:\Users\nguye\scoop\apps\zig\0.15.2\zig.exe C:\Users\nguye\scoop\apps\zig\0.15.2\lib G:\Projects\SandboxDev\NBody\viewer .zig-cache C:\Users\nguye\AppData\Local\zig --seed 0xd72c35ce -Ze64dc0b6f32e440e -Doptimize=ReleaseFast
