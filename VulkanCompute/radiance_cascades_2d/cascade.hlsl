@@ -90,23 +90,41 @@ struct PushConstants {
     [[vk::binding(N, M)]] = binding N in descriptor set M
 ------------------------------------------------------------------------------*/
 
-// Output: Where we write the computed radiance for this cascade level
-[[vk::binding(0, 0)]] RWTexture2D<float4> Output : register(u0);
+// Output: SH coefficients array (Layer 0=L0, Layer 1=L1x, Layer 2=L1y)
+[[vk::binding(0, 0)]] RWTexture2DArray<float4> OutputSH;
 
-// UpperCascade: The cascade level above this one (coarser/further range)
-// We sample this and add it to our radiance for complete GI
-[[vk::binding(1, 0)]] Texture2D<float4> UpperCascade : register(t0);
+// UpperCascade: SH from coarser level
+[[vk::binding(1, 0)]] Texture2DArray<float4> UpperSH;
 
-// History: Previous frame's accumulated radiance (for bounce lighting)
-// When a ray hits a wall, we sample what color was there last frame
-[[vk::binding(2, 0)]] Texture2D<float4> History : register(t1);
+// History: Previous frame's SH for bounce lighting
+[[vk::binding(2, 0)]] Texture2DArray<float4> HistorySH;
 
 // Light and Obstacle buffers - GPU-side storage
-[[vk::binding(3, 0)]] StructuredBuffer<Light> LightBuffer : register(t2);
-[[vk::binding(4, 0)]] StructuredBuffer<Obstacle> ObstacleBuffer : register(t3);
+[[vk::binding(3, 0)]] StructuredBuffer<Light> LightBuffer;
+[[vk::binding(4, 0)]] StructuredBuffer<Obstacle> ObstacleBuffer;
 
 // Linear sampler for smooth texture interpolation
-[[vk::binding(5, 0)]] SamplerState LinearSampler : register(s0);
+[[vk::binding(5, 0)]] SamplerState LinearSampler;
+
+// JFA Buffer
+[[vk::binding(6, 0)]] Texture2D<float2> JFABuffer;
+
+// SH Helpers
+void encodeSH(float angle, float3 radiance, inout float3 L0, inout float3 L1x, inout float3 L1y) {
+    L0 += radiance;
+    L1x += radiance * cos(angle);
+    L1y += radiance * sin(angle);
+}
+
+float3 decodeSH(float angle, float3 L0, float3 L1x, float3 L1y) {
+    float c = cos(angle);
+    float s = sin(angle);
+    return max(0.0, L0 + 2.0 * (L1x * c + L1y * s));
+}
+
+float dirToAngle(float2 dir) {
+    return atan2(dir.y, dir.x);
+}
 
 /*==============================================================================
     SIGNED DISTANCE FUNCTIONS (SDF)
@@ -274,12 +292,12 @@ float3 FresnelSchlick(float cosTheta, float3 F0) {
 [numthreads(16, 16, 1)]
 void main(uint3 DTid : SV_DispatchThreadID) {
     // Bounds check - threads outside image dimensions exit early
-    int2 dim;
-    Output.GetDimensions(dim.x, dim.y);
-    if (DTid.x >= dim.x || DTid.y >= dim.y) return;
+    uint dim_w, dim_h, dim_layers;
+    OutputSH.GetDimensions(dim_w, dim_h, dim_layers);
+    if (DTid.x >= dim_w || DTid.y >= dim_h) return;
 
     // Calculate UV and world position for this pixel
-    float2 uv = (float2(DTid.xy) + 0.5) / float2(dim.x, dim.y);
+    float2 uv = (float2(DTid.xy) + 0.5) / float2((float)dim_w, (float)dim_h);
     float2 worldPos = uv * pc.resolution;
     
     /*==========================================================================
@@ -289,9 +307,11 @@ void main(uint3 DTid : SV_DispatchThreadID) {
         Also merges the GI from all higher cascade levels into the final image.
     ==========================================================================*/
     if (pc.level == 0) {
-        float3 radiance = float3(0.0, 0.0, 0.0);
+        float3 L0 = float3(0.0, 0.0, 0.0);
+        float3 L1x = float3(0.0, 0.0, 0.0);
+        float3 L1y = float3(0.0, 0.0, 0.0);
         
-        // For each light, ray march to check for occlusion (shadows)
+        // For each light, ray march to check for occlusion and encode direction
         for (int l = 0; l < pc.lightCount; l++) {
             Light light = LightBuffer[l];
             float2 toLight = light.pos - worldPos;
@@ -304,7 +324,7 @@ void main(uint3 DTid : SV_DispatchThreadID) {
             for (int step = 0; step < 32; step++) {
                 float2 p = worldPos + dir * t;
                 
-                // Find closest obstacle (simplified, not using map() for perf)
+                // Find closest obstacle
                 float minDist = 9999.0;
                 for (int o = 0; o < pc.obstacleCount; o++) {
                     Obstacle obs = ObstacleBuffer[o];
@@ -321,23 +341,30 @@ void main(uint3 DTid : SV_DispatchThreadID) {
                 if (t >= dist) break;
             }
             
-            // Add light contribution if not occluded
+            // Add light contribution with SH encoding if not occluded
             if (!occluded) {
                 float falloff = 1.0 / (1.0 + dist * dist * 0.001);
-                radiance += light.color * falloff;
+                float3 lightContrib = light.color * falloff;
+                
+                // Encode light direction into SH coefficients
+                float angle = dirToAngle(dir);
+                encodeSH(angle, lightContrib, L0, L1x, L1y);
             }
         }
         
         // CRITICAL: Merge global illumination from higher cascade levels
-        // This is what makes the walls glow with bounced light
-        float3 gi = UpperCascade.SampleLevel(LinearSampler, uv, 0).rgb;
-        radiance += gi;
+        float3 gi_L0 = UpperSH.SampleLevel(LinearSampler, float3(uv, 0), 0).rgb;
+        float3 gi_L1x = UpperSH.SampleLevel(LinearSampler, float3(uv, 1), 0).rgb;
+        float3 gi_L1y = UpperSH.SampleLevel(LinearSampler, float3(uv, 2), 0).rgb;
+        L0 += gi_L0;
+        L1x += gi_L1x;
+        L1y += gi_L1y;
+        
+        // Compute radiance for display (reconstruct from SH for isotropic view, angle=0)
+        float3 radiance = L0;
         
         /*----------------------------------------------------------------------
             WALL MATERIAL RENDERING
-            
-            If this pixel is inside a wall, blend the wall's material color
-            into the output. Uses smooth edges for anti-aliasing.
         ----------------------------------------------------------------------*/
         float minDist = 9999.0;
         int hitID = -1;
@@ -350,20 +377,24 @@ void main(uint3 DTid : SV_DispatchThreadID) {
             }
         }
         
-        // Smooth edge: smoothstep creates anti-aliased wall boundaries
+        // Smooth edge
         float edgeWidth = 3.0;
         float edgeFactor = 1.0 - smoothstep(-edgeWidth, edgeWidth, minDist);
         
         if(edgeFactor > 0.0 && hitID != -1) {
             Obstacle obs = ObstacleBuffer[hitID];
             float3 albedo = obs.color;
-            
-            // Wall shading: 20% base color + 50% GI-tinted ambient
             float3 wallColor = albedo * 0.2 + radiance * albedo * 0.5;
             radiance = lerp(radiance, wallColor, edgeFactor);
+            // Also attenuate directional components on walls
+            L1x = lerp(L1x, L1x * 0.5, edgeFactor);
+            L1y = lerp(L1y, L1y * 0.5, edgeFactor);
         }
         
-        Output[DTid.xy] = float4(radiance, 1.0);
+        // Write SH coefficients to array layers
+        OutputSH[uint3(DTid.xy, 0)] = float4(L0, 1.0);
+        OutputSH[uint3(DTid.xy, 1)] = float4(L1x, 0.0);
+        OutputSH[uint3(DTid.xy, 2)] = float4(L1y, 0.0);
         return;
     }
     
@@ -406,53 +437,59 @@ void main(uint3 DTid : SV_DispatchThreadID) {
         noise = frac(magic.z * frac(dot(float2(DTid.xy), magic.xy)));
     }
     
-    float angleStep = 6.28318 / float(rayCount);  // 2*PI / rayCount
-    float3 radiance = float3(0.0, 0.0, 0.0);
+    float angleStep = 6.28318 / float(rayCount);
+    float3 L0 = float3(0.0, 0.0, 0.0);
+    float3 L1x = float3(0.0, 0.0, 0.0);
+    float3 L1y = float3(0.0, 0.0, 0.0);
     
-    /*--------------------------------------------------------------------------
-        RAY MARCHING LOOP
-        
-        Cast rays in all directions, accumulating light contributions.
-        For each ray:
-        1. Find where it hits a wall (within our distance interval)
-        2. Collect direct light contributions along the ray
-        3. Sample bounce light from previous frame at hit point
-    --------------------------------------------------------------------------*/
     for(int r = 0; r < 512; r++) {
         if(r >= rayCount) break;
         
-        // Calculate ray direction with jitter for anti-aliasing
         float angle = (float(r) + noise) * angleStep;
         float2 rd = float2(cos(angle), sin(angle));
         
-        // Ray march to find wall hit
         float tHit = rayMarchVis(worldPos, rd, rangeEnd);
-        if(tHit < rangeStart) continue;  // Hit before our interval starts
+        if(tHit < rangeStart) continue;
         float validEnd = min(tHit, rangeEnd);
         
-        // 1. Direct Lighting: Check for light sources along this ray segment
+        // Direct Light
+        float3 rayRadiance = float3(0.0, 0.0, 0.0);
         for(int l = 0; l < pc.lightCount; l++) {
             Light light = LightBuffer[l];
             float val = integrateLightSegment(worldPos, rd, rangeStart, validEnd, light.pos, light.radius);
-            if(val > 0.0) radiance += light.color * val;
+            if(val > 0.0) rayRadiance += light.color * val;
         }
 
-        // 2. Indirect Lighting: Sample bounce from previous frame at hit point
-        // This is the "magic" - light bouncing off walls accumulates over frames
+        // Indirect Light (Bounce)
         if(tHit < rangeEnd) {
             float2 hitPos = worldPos + rd * tHit;
             float2 hitUV = hitPos / pc.resolution;
             
             if(hitUV.x > 0.0 && hitUV.x < 1.0 && hitUV.y > 0.0 && hitUV.y < 1.0) {
-                 float3 bounceColor = History.SampleLevel(LinearSampler, hitUV, 0).rgb;
-                 radiance += bounceColor; 
+                 float3 dim = float3(1.0, 1.0, 1.0); // Simple bounce attenuation
+                 
+                 // Sample SH History for Glossy Reflection using array layers
+                 float3 histL0 = HistorySH.SampleLevel(LinearSampler, float3(hitUV, 0), 0).rgb;
+                 float3 histL1x = HistorySH.SampleLevel(LinearSampler, float3(hitUV, 1), 0).rgb;
+                 float3 histL1y = HistorySH.SampleLevel(LinearSampler, float3(hitUV, 2), 0).rgb;
+                 
+                 // Reflection direction: simplistic "towards viewer" (-rd)
+                 float bounceAngle = dirToAngle(-rd);
+                 float3 bounceColor = decodeSH(bounceAngle, histL0, histL1x, histL1y);
+                 
+                 rayRadiance += bounceColor; 
             }
         }
+        
+        encodeSH(angle, rayRadiance, L0, L1x, L1y);
     }
     
-    // Average contributions across all rays
-    if (rayCount > 0)
-        radiance /= float(rayCount);
+    if (rayCount > 0) {
+        float inv = 1.0 / float(rayCount);
+        L0 *= inv;
+        L1x *= inv;
+        L1y *= inv;
+    }
         
     // Merge with upper cascade (coarser level covers further distances)
     if (pc.level < pc.maxLevel - 1) {
@@ -463,13 +500,17 @@ void main(uint3 DTid : SV_DispatchThreadID) {
         // through walls from background cascades, but for diffuse GI in this
         // demo it acts as a valid simplification (walls are effectively "emissive"
         // with bounced light).
-        radiance += UpperCascade.SampleLevel(LinearSampler, uv, 0).rgb;
+        // Merge SH from upper cascade using array layers
+        L0 += UpperSH.SampleLevel(LinearSampler, float3(uv, 0), 0).rgb;
+        L1x += UpperSH.SampleLevel(LinearSampler, float3(uv, 1), 0).rgb;
+        L1y += UpperSH.SampleLevel(LinearSampler, float3(uv, 2), 0).rgb;
     }
     
     /*--------------------------------------------------------------------------
         PBR WALL RENDERING (Level 0 only gets here via the cascade path
         when showIntervals is on, but this code path is for higher levels)
     --------------------------------------------------------------------------*/
+    float3 radiance = L0;
     if(pc.level == 0) {
         float minDist = 9999.0;
         int hitID = -1;
@@ -533,5 +574,8 @@ void main(uint3 DTid : SV_DispatchThreadID) {
          if(d > rangeStart && d < rangeEnd) radiance += float3(0.1, 0.0, 0.0);
     }
     
-    Output[DTid.xy] = float4(radiance, 1.0);
+    // Write SH coefficients to array layers
+    OutputSH[uint3(DTid.xy, 0)] = float4(L0, 1.0);
+    OutputSH[uint3(DTid.xy, 1)] = float4(L1x, 0.0);
+    OutputSH[uint3(DTid.xy, 2)] = float4(L1y, 0.0);
 }

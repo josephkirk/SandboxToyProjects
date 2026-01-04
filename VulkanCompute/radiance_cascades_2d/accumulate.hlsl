@@ -27,16 +27,16 @@
     Author: Nguyen Phi Hung
 ==============================================================================*/
 
-// Output: Accumulated result written here
-[[vk::binding(0, 0)]] RWTexture2D<float4> Result : register(u0);
+// Output: Accumulated SH results (Layer 0=L0, Layer 1=L1x, Layer 2=L1y)
+[[vk::binding(0, 0)]] RWTexture2DArray<float4> ResultSH;
 
-// Current: This frame's cascade output (level 0 - the final radiance)
-[[vk::binding(1, 0)]] Texture2D<float4> Current : register(t0);
+// Current: This frame's cascade output
+[[vk::binding(1, 0)]] Texture2DArray<float4> CurrentSH;
 
-// History: Previous frame's accumulated result (used as blend source)
-[[vk::binding(2, 0)]] Texture2D<float4> History : register(t1);
+// History: Previous frame's accumulated result  
+[[vk::binding(2, 0)]] Texture2DArray<float4> HistorySH;
 
-// Blend factor passed from CPU - can be adjusted in real-time via ImGui
+// Blend factor passed from CPU
 struct PushConstants {
    float blend;  // 0.0 = keep history, 1.0 = use only current frame
 };
@@ -44,13 +44,13 @@ struct PushConstants {
 
 [numthreads(16, 16, 1)]
 void main(uint3 DTid : SV_DispatchThreadID) {
-    // Sample current and previous frame colors
-    float3 cur = Current[DTid.xy].rgb;
-    float3 hist = History[DTid.xy].rgb;
-    
-    // Exponential moving average: gradual blend toward current frame
-    // This smooths out stochastic noise while preserving responsiveness
-    float3 res = lerp(hist, cur, pc.blend);
-    
-    Result[DTid.xy] = float4(res, 1.0);
+    // Process all 3 SH layers: L0, L1x, L1y
+    for(int layer = 0; layer < 3; layer++) {
+        int4 coord = int4(DTid.xy, layer, 0);
+        
+        float4 cur = CurrentSH.Load(coord);
+        float4 hist = HistorySH.Load(coord);
+        
+        ResultSH[uint3(DTid.xy, layer)] = lerp(hist, cur, pc.blend);
+    }
 }

@@ -75,7 +75,7 @@ const MAX_OBSTACLES = 4096;
 const Light = extern struct {
     pos: [2]f32, // Position in screen coordinates
     radius: f32, // Light influence radius in pixels
-    padding: f32 = 0.0, // GPU alignment (float3 needs 16-byte alignment)
+    falloff: f32 = 1.0, // Attenuation exponent (1.0 = linear, 2.0 = quadratic)
     color: [3]f32, // RGB emission color (HDR - can exceed 1.0)
     padding2: f32 = 0.0,
 };
@@ -109,6 +109,18 @@ const PushConstants = extern struct {
 /// Push constants for the accumulate (temporal blend) shader.
 const AccumConstants = extern struct {
     blend: f32, // EMA blend factor: 0 = keep history, 1 = use current
+};
+
+/// Push constants for JFA (Jump Flooding Algorithm) shaders.
+const JFAConstants = extern struct {
+    stepSize: i32, // 0 = Init pass, >0 = Jump pass with this step size
+    obstacleCount: i32, // Number of obstacles to seed
+    resolution: [2]f32, // Texture dimensions
+};
+
+/// Push constants for Display shader (Debug visualization)
+const DisplayConstants = extern struct {
+    debugMode: i32, // 0=None, 1=L1x, 2=L1y, 3=Vector
 };
 
 // Helper to create a buffer
@@ -166,26 +178,15 @@ fn updateDescriptorSetBuffer(ctx: *vk_win.WindowContext, set: c.VkDescriptorSet,
 }
 
 // Helper to update descriptor set with combined image sampler
-// For compatibility with HLSL Texture2D + SamplerState bindings, we often use SEPARATE sampler and image in HLSL but Combined in Vulkan if using shader reflection correctly.
-// But here manual binding:
-// Our layout:
-// u0: Storage Image (Output)
-// t0: Texture (Upper)
-// t1: Texture (History)
-// t2: Buffer (Light)
-// t3: Buffer (Obstacle)
-// s0: Sampler
 //
-// We will bind t0/t1 as SAMPLED_IMAGE and s0 as SAMPLER.
-// Note: If using multiple sets, it might be cleaner, but one set is fine.
-// But we need to verify HLSL bindings map to these binding indices.
-// Often SpirV-Cross maps registers loosely. I will use consecutive bindings.
-// Binding 0: Output (Storage)
-// Binding 1: Upper (Sampled)
-// Binding 2: History (Sampled)
+// CASCADE SHADER BINDINGS (after texture array refactor):
+// Binding 0: OutputSH (RWTexture2DArray, 3 layers: L0, L1x, L1y)
+// Binding 1: UpperSH (Texture2DArray, sampled)
+// Binding 2: HistorySH (Texture2DArray, sampled)
 // Binding 3: Lights (StorageBuffer)
 // Binding 4: Obstacles (StorageBuffer)
-// Binding 5: Sampler (Sampler)
+// Binding 5: LinearSampler
+// Binding 6: JFABuffer (Texture2D)
 
 pub fn main() void {
     run_app() catch |err| {
@@ -213,32 +214,39 @@ fn run_app() !void {
     // Resources
     // =========================================================================
 
-    // Cascades
-    var cascades = try std.ArrayList(vk_win.StorageImage).initCapacity(allocator, MAX_CASCADES);
-    defer cascades.deinit(allocator);
+    // Cascade SH Array Textures (3 layers: L0, L1x, L1y)
+    var cascadesSH = try std.ArrayList(vk_win.StorageImageArray).initCapacity(allocator, MAX_CASCADES);
+    defer cascadesSH.deinit(allocator);
 
     var w: u32 = ctx.width;
     var h: u32 = ctx.height;
 
     for (0..MAX_CASCADES) |_| {
-        const img = try ctx.createStorageImage(w, h, c.VK_FORMAT_R32G32B32A32_SFLOAT); // High precision for radiance
-        try cascades.append(allocator, img);
+        const img = try ctx.createStorageImageArray(w, h, 3, c.VK_FORMAT_R32G32B32A32_SFLOAT);
+        try cascadesSH.append(allocator, img);
         w = @max(1, w / 2);
         h = @max(1, h / 2);
     }
     defer {
-        for (cascades.items) |img| img.destroy(ctx.device);
+        for (cascadesSH.items) |img| img.destroy(ctx.device);
     }
 
-    // History (Ping Pong)
-    var historyA = try ctx.createStorageImage(ctx.width, ctx.height, c.VK_FORMAT_R32G32B32A32_SFLOAT);
-    defer historyA.destroy(ctx.device);
-    var historyB = try ctx.createStorageImage(ctx.width, ctx.height, c.VK_FORMAT_R32G32B32A32_SFLOAT);
-    defer historyB.destroy(ctx.device);
+    // History SH Array Textures (Ping Pong) - 3 layers each
+    var historySH_A = try ctx.createStorageImageArray(ctx.width, ctx.height, 3, c.VK_FORMAT_R32G32B32A32_SFLOAT);
+    defer historySH_A.destroy(ctx.device);
+    var historySH_B = try ctx.createStorageImageArray(ctx.width, ctx.height, 3, c.VK_FORMAT_R32G32B32A32_SFLOAT);
+    defer historySH_B.destroy(ctx.device);
 
     // Display Image
     var displayImg = try ctx.createStorageImage(ctx.width, ctx.height, c.VK_FORMAT_R8G8B8A8_UNORM);
     defer displayImg.destroy(ctx.device);
+
+    // JFA Images (Ping-Pong for Jump Flooding Algorithm)
+    // R32G32 stores (x, y) position of nearest seed
+    var jfaImgA = try ctx.createStorageImage(ctx.width, ctx.height, c.VK_FORMAT_R32G32_SFLOAT);
+    defer jfaImgA.destroy(ctx.device);
+    var jfaImgB = try ctx.createStorageImage(ctx.width, ctx.height, c.VK_FORMAT_R32G32_SFLOAT);
+    defer jfaImgB.destroy(ctx.device);
 
     // =========================================================================
     // ImGui Resources
@@ -375,13 +383,17 @@ fn run_app() !void {
     var last_mouse_x: i32 = -1;
     var last_mouse_y: i32 = -1;
     var brush_radius: f32 = 25.0;
+    var light_radius: f32 = 50.0;
+    var light_intensity: f32 = 1.0;
+    var light_falloff: f32 = 1.0;
 
     // Shader Control State (exposed via ImGui)
     var stochastic_mode: bool = true;
     var blend_speed: f32 = 0.1;
     var base_rays: i32 = 4;
     var show_intervals: bool = false;
-    var blend_radius: f32 = 30.0; // Metaball blend radius
+    var blend_radius: f32 = 100.0; // Metaball blend radius (high value fills gaps between circles)
+    var display_debug_mode: i32 = 0; // 0=Normal, 1=L1x, 2=L1y, 3=Vector
 
     // Color palette (indexed by 1-9 keys)
     const colors = [_][3]f32{
@@ -401,14 +413,15 @@ fn run_app() !void {
     // Pipelines
     // =========================================================================
 
-    // 1. Cascade Pipeline
+    // 1. Cascade Pipeline with Spherical Harmonics using array textures
     const cascade_bindings = &[_]c.VkDescriptorSetLayoutBinding{
-        .{ .binding = 0, .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // Output
-        .{ .binding = 1, .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // Upper
-        .{ .binding = 2, .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // History
+        .{ .binding = 0, .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // OutputSH (3-layer array)
+        .{ .binding = 1, .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // UpperSH (3-layer array)
+        .{ .binding = 2, .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // HistorySH (3-layer array)
         .{ .binding = 3, .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // Lights
         .{ .binding = 4, .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // Obstacles
         .{ .binding = 5, .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLER, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // Sampler
+        .{ .binding = 6, .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // JFA SDF
     };
     const cascade_dsl = try ctx.createDescriptorSetLayout(cascade_bindings);
     defer ctx.destroyDescriptorSetLayout(cascade_dsl);
@@ -421,11 +434,11 @@ fn run_app() !void {
     const cascade_pipe = try ctx.createComputePipeline(cascade_spirv, cascade_layout);
     defer ctx.destroyPipeline(cascade_pipe);
 
-    // 2. Accumulate Pipeline
+    // 2. Accumulate Pipeline with SH array textures
     const accum_bindings = &[_]c.VkDescriptorSetLayoutBinding{
-        .{ .binding = 0, .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // Result/Display
-        .{ .binding = 1, .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // Current
-        .{ .binding = 2, .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // History Read
+        .{ .binding = 0, .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // ResultSH (3-layer array)
+        .{ .binding = 1, .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // CurrentSH (3-layer array)
+        .{ .binding = 2, .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // HistorySH (3-layer array)
     };
     const accum_dsl = try ctx.createDescriptorSetLayout(accum_bindings);
     defer ctx.destroyDescriptorSetLayout(accum_dsl);
@@ -437,20 +450,42 @@ fn run_app() !void {
     const accum_pipe = try ctx.createComputePipeline(accum_spirv, accum_layout);
     defer ctx.destroyPipeline(accum_pipe);
 
-    // 3. Display Pipeline (Tone Map)
+    // 3. Display Pipeline (Tone Map + Debug) with SH array texture
     const display_bindings = &[_]c.VkDescriptorSetLayoutBinding{
         .{ .binding = 0, .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // Output
-        .{ .binding = 1, .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // Input
+        .{ .binding = 1, .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // HistorySH (3-layer array)
     };
     const display_dsl = try ctx.createDescriptorSetLayout(display_bindings);
     defer ctx.destroyDescriptorSetLayout(display_dsl);
-    const display_layout = try ctx.createPipelineLayout(display_dsl, 0, 0);
+    const display_layout = try ctx.createPipelineLayout(display_dsl, @sizeOf(DisplayConstants), c.VK_SHADER_STAGE_COMPUTE_BIT);
     defer ctx.destroyPipelineLayout(display_layout);
 
     const display_spirv = try vk_comp.ShaderCompiler.compile(allocator, "display.hlsl", "main", "cs_6_0");
     defer allocator.free(display_spirv);
     const display_pipe = try ctx.createComputePipeline(display_spirv, display_layout);
     defer ctx.destroyPipeline(display_pipe);
+
+    // 4. JFA Pipeline (Jump Flooding Algorithm for SDF generation)
+    const jfa_bindings = &[_]c.VkDescriptorSetLayoutBinding{
+        .{ .binding = 0, .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // Output
+        .{ .binding = 1, .descriptorType = c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // Input
+        .{ .binding = 2, .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT }, // Obstacles
+    };
+    const jfa_dsl = try ctx.createDescriptorSetLayout(jfa_bindings);
+    defer ctx.destroyDescriptorSetLayout(jfa_dsl);
+    const jfa_layout = try ctx.createPipelineLayout(jfa_dsl, @sizeOf(JFAConstants), c.VK_SHADER_STAGE_COMPUTE_BIT);
+    defer ctx.destroyPipelineLayout(jfa_layout);
+
+    // Compile JFA shaders (separate init and jump passes)
+    const jfa_init_spirv = try vk_comp.ShaderCompiler.compile(allocator, "jfa_init.hlsl", "main", "cs_6_0");
+    defer allocator.free(jfa_init_spirv);
+    const jfa_init_pipe = try ctx.createComputePipeline(jfa_init_spirv, jfa_layout);
+    defer ctx.destroyPipeline(jfa_init_pipe);
+
+    const jfa_jump_spirv = try vk_comp.ShaderCompiler.compile(allocator, "jfa_jump.hlsl", "main", "cs_6_0");
+    defer allocator.free(jfa_jump_spirv);
+    const jfa_jump_pipe = try ctx.createComputePipeline(jfa_jump_spirv, jfa_layout);
+    defer ctx.destroyPipeline(jfa_jump_pipe);
 
     // =========================================================================
     // Descriptor Pool & Sets
@@ -501,6 +536,10 @@ fn run_app() !void {
 
     const displaySet = try ctx.allocateDescriptorSet(pool, display_dsl);
 
+    // JFA Sets (Ping-Pong for iterative jump flooding)
+    const jfaSetA = try ctx.allocateDescriptorSet(pool, jfa_dsl);
+    const jfaSetB = try ctx.allocateDescriptorSet(pool, jfa_dsl);
+
     // =========================================================================
     // Loop
     // =========================================================================
@@ -510,16 +549,19 @@ fn run_app() !void {
     // Initialize Images
     {
         const cmdbuf = try ctx.beginFrame();
-        // Clear all cascades to black, transition to General
-        for (cascades.items) |img| {
+        // Clear all cascade SH array textures (3 layers each)
+        for (cascadesSH.items) |img| {
             ctx.transitionImageLayout(cmdbuf, img.handle, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_GENERAL);
             ctx.clearImage(cmdbuf, img.handle, c.VK_IMAGE_LAYOUT_GENERAL, 0, 0, 0, 0);
         }
-        ctx.transitionImageLayout(cmdbuf, historyA.handle, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_GENERAL);
-        ctx.clearImage(cmdbuf, historyA.handle, c.VK_IMAGE_LAYOUT_GENERAL, 0, 0, 0, 0);
-        ctx.transitionImageLayout(cmdbuf, historyB.handle, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_GENERAL);
-        ctx.clearImage(cmdbuf, historyB.handle, c.VK_IMAGE_LAYOUT_GENERAL, 0, 0, 0, 0);
+        // Clear history SH array textures
+        ctx.transitionImageLayout(cmdbuf, historySH_A.handle, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_GENERAL);
+        ctx.clearImage(cmdbuf, historySH_A.handle, c.VK_IMAGE_LAYOUT_GENERAL, 0, 0, 0, 0);
+        ctx.transitionImageLayout(cmdbuf, historySH_B.handle, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_GENERAL);
+        ctx.clearImage(cmdbuf, historySH_B.handle, c.VK_IMAGE_LAYOUT_GENERAL, 0, 0, 0, 0);
         ctx.transitionImageLayout(cmdbuf, displayImg.handle, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_GENERAL);
+        ctx.transitionImageLayout(cmdbuf, jfaImgA.handle, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_GENERAL);
+        ctx.transitionImageLayout(cmdbuf, jfaImgB.handle, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_GENERAL);
 
         // Also transition Sampled bits for History/Upper?
         // Layout GENERAL is compatible with everything usually (Storage+Sampled).
@@ -561,8 +603,13 @@ fn run_app() !void {
                 if (lightCount < MAX_LIGHTS) {
                     lightSlice[@intCast(lightCount)] = Light{
                         .pos = .{ @as(f32, @floatFromInt(mx)), @as(f32, @floatFromInt(my)) },
-                        .radius = brush_radius,
-                        .color = colors[current_color_idx],
+                        .radius = light_radius,
+                        .falloff = light_falloff,
+                        .color = .{
+                            colors[current_color_idx][0] * light_intensity,
+                            colors[current_color_idx][1] * light_intensity,
+                            colors[current_color_idx][2] * light_intensity,
+                        },
                     };
                     lightCount += 1;
                     std.debug.print("Added light {d} at ({d}, {d}) color={d}\n", .{ lightCount, mx, my, current_color_idx + 1 });
@@ -598,11 +645,11 @@ fn run_app() !void {
         if (ctx.key_pressed == 'C') {
             lightCount = 0;
             obstacleCount = 0;
-            // Clear history images
-            ctx.clearImage(cmdbuf, historyA.handle, c.VK_IMAGE_LAYOUT_GENERAL, 0, 0, 0, 0);
-            ctx.clearImage(cmdbuf, historyB.handle, c.VK_IMAGE_LAYOUT_GENERAL, 0, 0, 0, 0);
-            // Clear cascades too
-            for (cascades.items) |img| {
+            // Clear history SH array images
+            ctx.clearImage(cmdbuf, historySH_A.handle, c.VK_IMAGE_LAYOUT_GENERAL, 0, 0, 0, 0);
+            ctx.clearImage(cmdbuf, historySH_B.handle, c.VK_IMAGE_LAYOUT_GENERAL, 0, 0, 0, 0);
+            // Clear cascades SH too
+            for (cascadesSH.items) |img| {
                 ctx.clearImage(cmdbuf, img.handle, c.VK_IMAGE_LAYOUT_GENERAL, 0, 0, 0, 0);
             }
             std.debug.print("Cleared scene\n", .{});
@@ -626,16 +673,74 @@ fn run_app() !void {
             std.debug.print("Color: {d}\n", .{current_color_idx + 1});
         }
 
+        // 'D' Key: Toggle Debug Mode (0=Normal, 1=L1x, 2=L1y, 3=Vector)
+        if (ctx.key_pressed == 'D') {
+            display_debug_mode = @mod(display_debug_mode + 1, 4);
+            std.debug.print("Debug Mode: {d}\n", .{display_debug_mode});
+        }
+
         const current_time = std.time.milliTimestamp();
         const elapsed = @as(f32, @floatFromInt(current_time - start_time)) / 1000.0;
 
         // Render Pipeline
 
-        // History Pointers
-        const historyRead = if (frame_count % 2 == 0) historyA else historyB;
-        const historyWrite = if (frame_count % 2 == 0) historyB else historyA;
+        // History Pointers for SH array textures
+        const historySHRead = if (frame_count % 2 == 0) historySH_A else historySH_B;
+        const historySHWrite = if (frame_count % 2 == 0) historySH_B else historySH_A;
 
-        // 1. Cascades (Coarse -> Fine)
+        // 1. JFA Pass (Generate SDF from obstacles)
+        var jfaResult = jfaImgA;
+        {
+            // Update JFA Descriptors
+            ctx.updateDescriptorSetImage(jfaSetA, 0, jfaImgA.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+            ctx.updateDescriptorSetImage(jfaSetA, 1, jfaImgB.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
+            updateDescriptorSetBuffer(&ctx, jfaSetA, 2, obstacleBuf.handle, obstaclesSize, c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+
+            ctx.updateDescriptorSetImage(jfaSetB, 0, jfaImgB.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+            ctx.updateDescriptorSetImage(jfaSetB, 1, jfaImgA.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
+            updateDescriptorSetBuffer(&ctx, jfaSetB, 2, obstacleBuf.handle, obstaclesSize, c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+
+            // Init Pass: Seed obstacle positions
+            {
+                const pc_jfa = JFAConstants{
+                    .stepSize = 0,
+                    .obstacleCount = obstacleCount,
+                    .resolution = .{ @as(f32, @floatFromInt(ctx.width)), @as(f32, @floatFromInt(ctx.height)) },
+                };
+                ctx.bindComputePipeline(cmdbuf, jfa_init_pipe);
+                ctx.bindDescriptorSet(cmdbuf, c.VK_PIPELINE_BIND_POINT_COMPUTE, jfa_layout, jfaSetA);
+                ctx.pushConstants(cmdbuf, jfa_layout, c.VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(JFAConstants), &pc_jfa);
+                ctx.dispatchCompute(cmdbuf, (ctx.width + 15) / 16, (ctx.height + 15) / 16, 1);
+                ctx.memoryBarrier(cmdbuf, c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, c.VK_ACCESS_SHADER_WRITE_BIT, c.VK_ACCESS_SHADER_READ_BIT);
+                jfaResult = jfaImgA;
+            }
+
+            // Jump Passes: Flood nearest seed info
+            const max_dim = @max(ctx.width, ctx.height);
+            const max_steps = std.math.log2_int(u32, max_dim);
+
+            if (max_steps > 0) {
+                var use_set_b = true;
+                var step: u32 = @as(u32, 1) << @intCast(max_steps - 1);
+                while (step >= 1) : (step /= 2) {
+                    const pc_jfa = JFAConstants{
+                        .stepSize = @intCast(step),
+                        .obstacleCount = obstacleCount,
+                        .resolution = .{ @as(f32, @floatFromInt(ctx.width)), @as(f32, @floatFromInt(ctx.height)) },
+                    };
+                    const set = if (use_set_b) jfaSetB else jfaSetA;
+                    ctx.bindComputePipeline(cmdbuf, jfa_jump_pipe);
+                    ctx.bindDescriptorSet(cmdbuf, c.VK_PIPELINE_BIND_POINT_COMPUTE, jfa_layout, set);
+                    ctx.pushConstants(cmdbuf, jfa_layout, c.VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(JFAConstants), &pc_jfa);
+                    ctx.dispatchCompute(cmdbuf, (ctx.width + 15) / 16, (ctx.height + 15) / 16, 1);
+                    ctx.memoryBarrier(cmdbuf, c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, c.VK_ACCESS_SHADER_WRITE_BIT, c.VK_ACCESS_SHADER_READ_BIT);
+                    jfaResult = if (use_set_b) jfaImgB else jfaImgA;
+                    use_set_b = !use_set_b;
+                }
+            }
+        }
+
+        // 2. Cascades (Coarse -> Fine)
         // MaxLevel-1 downto 0
         const maxLevel = MAX_CASCADES;
 
@@ -645,17 +750,18 @@ fn run_app() !void {
         var i: i32 = maxLevel - 1;
         while (i >= 0) : (i -= 1) {
             const levelIdx = @as(usize, @intCast(i));
-            const targetImg = cascades.items[levelIdx];
-            const upperImg = if (i < maxLevel - 1) cascades.items[levelIdx + 1] else cascades.items[maxLevel - 1]; // Dummy if top level
+            const targetSH = cascadesSH.items[levelIdx];
+            const upperSH = if (i < maxLevel - 1) cascadesSH.items[levelIdx + 1] else cascadesSH.items[maxLevel - 1];
 
-            // Update Descriptor Set for this level
-            // Binding 0: Output
-            ctx.updateDescriptorSetImage(cascadeSets.items[levelIdx], 0, targetImg.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-            // Binding 1: Upper (Sampled)
-            // Even at max level we bind something to suppress validation, though we check level inside shader
-            ctx.updateDescriptorSetImage(cascadeSets.items[levelIdx], 1, upperImg.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
-            // Binding 2: History (Sampled)
-            ctx.updateDescriptorSetImage(cascadeSets.items[levelIdx], 2, historyRead.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
+            // Update Descriptor Set for this level (simplified for array textures)
+            // Binding 0: OutputSH (3-layer array)
+            ctx.updateDescriptorSetImage(cascadeSets.items[levelIdx], 0, targetSH.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+            // Binding 1: UpperSH (3-layer array)
+            ctx.updateDescriptorSetImage(cascadeSets.items[levelIdx], 1, upperSH.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
+            // Binding 2: HistorySH (3-layer array)
+            ctx.updateDescriptorSetImage(cascadeSets.items[levelIdx], 2, historySHRead.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
+            // Binding 6: JFA SDF
+            ctx.updateDescriptorSetImage(cascadeSets.items[levelIdx], 6, jfaResult.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
 
             const pc = PushConstants{
                 .resolution = .{ @as(f32, @floatFromInt(ctx.width)), @as(f32, @floatFromInt(ctx.height)) },
@@ -674,8 +780,8 @@ fn run_app() !void {
             ctx.bindDescriptorSet(cmdbuf, c.VK_PIPELINE_BIND_POINT_COMPUTE, cascade_layout, cascadeSets.items[levelIdx]);
             ctx.pushConstants(cmdbuf, cascade_layout, c.VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(PushConstants), &pc);
 
-            const gx = (targetImg.width + 15) / 16;
-            const gy = (targetImg.height + 15) / 16;
+            const gx = (targetSH.width + 15) / 16;
+            const gy = (targetSH.height + 15) / 16;
             ctx.dispatchCompute(cmdbuf, gx, gy, 1);
 
             // Barrier for Next Level (reading this level as upper)
@@ -685,10 +791,16 @@ fn run_app() !void {
         // 2. Accumulate
         // Input: Cascade[0], HistoryRead
         // Output: HistoryWrite (Result)
+
         const activeAccumSet = if (frame_count % 2 == 0) accumSetA else accumSetB;
-        ctx.updateDescriptorSetImage(activeAccumSet, 0, historyWrite.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        ctx.updateDescriptorSetImage(activeAccumSet, 1, cascades.items[0].view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
-        ctx.updateDescriptorSetImage(activeAccumSet, 2, historyRead.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
+
+        // Bind SH array textures (simplified: 3 bindings instead of 9)
+        // Binding 0: ResultSH (output)
+        ctx.updateDescriptorSetImage(activeAccumSet, 0, historySHWrite.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        // Binding 1: CurrentSH (cascade output)
+        ctx.updateDescriptorSetImage(activeAccumSet, 1, cascadesSH.items[0].view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
+        // Binding 2: HistorySH (previous frame)
+        ctx.updateDescriptorSetImage(activeAccumSet, 2, historySHRead.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
 
         ctx.bindComputePipeline(cmdbuf, accum_pipe);
         ctx.bindDescriptorSet(cmdbuf, c.VK_PIPELINE_BIND_POINT_COMPUTE, accum_layout, activeAccumSet);
@@ -701,12 +813,16 @@ fn run_app() !void {
         ctx.memoryBarrier(cmdbuf, c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, c.VK_ACCESS_SHADER_WRITE_BIT, c.VK_ACCESS_SHADER_READ_BIT);
 
         // 3. Display
-        // Input: HistoryWrite
+        // Input: HistorySHWrite (array texture)
         // Output: DisplayImg
         ctx.updateDescriptorSetImage(displaySet, 0, displayImg.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        ctx.updateDescriptorSetImage(displaySet, 1, historyWrite.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
+        ctx.updateDescriptorSetImage(displaySet, 1, historySHWrite.view, c.VK_IMAGE_LAYOUT_GENERAL, c.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
 
         ctx.bindComputePipeline(cmdbuf, display_pipe);
+
+        const pc_display = DisplayConstants{ .debugMode = display_debug_mode };
+        ctx.pushConstants(cmdbuf, display_layout, c.VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(DisplayConstants), &pc_display);
+
         ctx.bindDescriptorSet(cmdbuf, c.VK_PIPELINE_BIND_POINT_COMPUTE, display_layout, displaySet);
         ctx.dispatchCompute(cmdbuf, (ctx.width + 15) / 16, (ctx.height + 15) / 16, 1);
 
@@ -746,6 +862,9 @@ fn run_app() !void {
         if (imgui.begin("Radiance Cascades Debug")) {
             imgui.text("Drawing:");
             _ = imgui.sliderFloat("Brush Size", &brush_radius, 5.0, 100.0);
+            _ = imgui.sliderFloat("Light Radius", &light_radius, 1.0, 300.0);
+            _ = imgui.sliderFloat("Light Intensity", &light_intensity, 0.01, 10.0);
+            _ = imgui.sliderFloat("Light Falloff", &light_falloff, 0.5, 4.0);
             imgui.text("Colors (press 1-9 keys)");
 
             imgui.text("");
@@ -754,7 +873,7 @@ fn run_app() !void {
             _ = imgui.sliderFloat("Blend Speed", &blend_speed, 0.01, 1.0);
             _ = imgui.sliderInt("Base Rays", &base_rays, 1, 8);
             _ = imgui.checkbox("Show Intervals", &show_intervals);
-            _ = imgui.sliderFloat("GI Smoothness", &blend_radius, 1.0, 100.0);
+            _ = imgui.sliderFloat("GI Smoothness", &blend_radius, 50.0, 200.0);
 
             imgui.text("");
             if (imgui.button("Clear Scene")) {

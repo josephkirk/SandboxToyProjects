@@ -1043,6 +1043,68 @@ pub const WindowContext = struct {
         };
     }
 
+    /// Creates a 2D array texture with multiple layers (for SH: L0/L1x/L1y)
+    pub fn createStorageImageArray(self: *WindowContext, image_width: u32, image_height: u32, array_layers: u32, format: c.VkFormat) !StorageImageArray {
+        const imageInfo = c.VkImageCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .imageType = c.VK_IMAGE_TYPE_2D,
+            .extent = .{ .width = image_width, .height = image_height, .depth = 1 },
+            .mipLevels = 1,
+            .arrayLayers = array_layers,
+            .format = format,
+            .tiling = c.VK_IMAGE_TILING_OPTIMAL,
+            .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+            .usage = c.VK_IMAGE_USAGE_STORAGE_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT | c.VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+            .samples = c.VK_SAMPLE_COUNT_1_BIT,
+            .flags = 0,
+        };
+
+        var handle: c.VkImage = undefined;
+        if (c.vkCreateImage(self.device, &imageInfo, null, &handle) != c.VK_SUCCESS) return error.ImageCreationFailed;
+
+        var memRequirements: c.VkMemoryRequirements = undefined;
+        c.vkGetImageMemoryRequirements(self.device, handle, &memRequirements);
+
+        const allocInfo = c.VkMemoryAllocateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize = memRequirements.size,
+            .memoryTypeIndex = self.findMemoryType(memRequirements.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+        };
+
+        var memory: c.VkDeviceMemory = undefined;
+        if (c.vkAllocateMemory(self.device, &allocInfo, null, &memory) != c.VK_SUCCESS) return error.MemoryAllocationFailed;
+
+        _ = c.vkBindImageMemory(self.device, handle, memory, 0);
+
+        const viewInfo = c.VkImageViewCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = handle,
+            .viewType = c.VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+            .format = format,
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = array_layers,
+            },
+        };
+
+        var view: c.VkImageView = undefined;
+        if (c.vkCreateImageView(self.device, &viewInfo, null, &view) != c.VK_SUCCESS) return error.ImageViewCreationFailed;
+
+        return StorageImageArray{
+            .handle = handle,
+            .memory = memory,
+            .view = view,
+            .width = image_width,
+            .height = image_height,
+            .layers = array_layers,
+            .format = format,
+        };
+    }
+
     pub fn createComputePipeline(self: *WindowContext, shader_code: []const u8, layout: c.VkPipelineLayout) !c.VkPipeline {
         var module: c.VkShaderModule = undefined;
         const info = c.VkShaderModuleCreateInfo{
@@ -1579,6 +1641,23 @@ pub const StorageImage = struct {
     format: c.VkFormat,
 
     pub fn destroy(self: StorageImage, device: c.VkDevice) void {
+        c.vkDestroyImageView(device, self.view, null);
+        c.vkDestroyImage(device, self.handle, null);
+        c.vkFreeMemory(device, self.memory, null);
+    }
+};
+
+/// 2D Array texture with multiple layers (e.g., for SH coefficients L0/L1x/L1y)
+pub const StorageImageArray = struct {
+    handle: c.VkImage,
+    memory: c.VkDeviceMemory,
+    view: c.VkImageView,
+    width: u32,
+    height: u32,
+    layers: u32,
+    format: c.VkFormat,
+
+    pub fn destroy(self: StorageImageArray, device: c.VkDevice) void {
         c.vkDestroyImageView(device, self.view, null);
         c.vkDestroyImage(device, self.handle, null);
         c.vkFreeMemory(device, self.memory, null);
