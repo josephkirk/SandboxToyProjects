@@ -27,9 +27,7 @@
 #define TAU 6.28318530718
 
 // CONSTANTS matching the reference customization
-#define BASE_RAYS 4
-#define CASCADE_INTERVAL 1.0
-#define RAY_INTERVAL 1.0
+// Parametrized via PushConstants
 
 /*------------------------------------------------------------------------------
     DATA STRUCTURES
@@ -62,7 +60,9 @@ struct PushConstants {
     int stochasticMode;
     float2 resolution;
     float blendRadius;
-    float padding1;
+    float cascadeInterval;
+    float rayInterval;
+    int ringingFix;
 };
 
 [[vk::push_constant]] PushConstants pc;
@@ -230,43 +230,39 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     float cascadeIndex = float(pc.level);
     
     // Geometric Progression Parameters
-    float base = float(BASE_RAYS); // 4.0
-    float sqrtBase = sqrt(base);   // 2.0
+    float base = float(max(1, pc.baseRays)); 
+    float sqrtBase = sqrt(base);   
     
     // Calculate Ray Count and Spacing for this level
-    // In Probe-Based, we don't scale ray count PER PIXEL, but the logical ray count scaling exists
-    // spacing = 2^level
     float spacing = pow(sqrtBase, cascadeIndex);
     
     // Grid sizing
     float2 size = floor(resolution / spacing);
     
     // Addressing the Probe Atlas
-    // probeRelativePosition: Where we are spatially (wrapping every 'size' pixels)
-    // This effectively tiles the screen into 'spacing' x 'spacing' grids
     float2 probeRelativePosition = fmod(coord, size);
-    
-    // rayPos: Which ray subset (probe index) are we calculating?
-    // 0..(spacing-1)
     float2 rayPos = floor(coord / size); 
     
     // Determine the base index of rays for this pixel
-    // Each pixel computes 'base' (4) rays starting from baseIndex
-    // The 'index' in the loop will range [baseIndex, baseIndex + 4)
     float baseIndex = (rayPos.x + (spacing * rayPos.y)) * base;
+
+    // Modifier Hack 
+    // "Hand-wavy rule that improved smoothing of other base ray counts"
+    float modifierHack = (pc.ringingFix != 0 && base >= 16.0) ? sqrtBase : 1.0; 
+
     
     // Interval Logic
-    // We use a geometric progression for ray distance ranges to ensure full coverage
-    // L0: 0.0 .. 2.0
-    // L1: 2.0 .. 8.0
-    // L2: 8.0 .. 32.0 (and so on, doubling distance each time in this config)
+    float modifiedRayInterval = modifierHack * pc.rayInterval;
+    float globalInterval = pc.cascadeInterval;
+
     float rangeStart, rangeEnd;
     if (cascadeIndex == 0.0) {
         rangeStart = 0.0;
-        rangeEnd = 2.0 * CASCADE_INTERVAL; 
+        rangeEnd = 2.0 * globalInterval; 
     } else {
-        rangeStart = 2.0 * CASCADE_INTERVAL * pow(4.0, cascadeIndex - 1.0);
-        rangeEnd = 2.0 * CASCADE_INTERVAL * pow(4.0, cascadeIndex);
+        float scaler = globalInterval; 
+        rangeStart = 2.0 * scaler * pow(4.0, cascadeIndex - 1.0);
+        rangeEnd = 2.0 * scaler * pow(4.0, cascadeIndex);
     }
     
     // Ray Angles
@@ -318,8 +314,8 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     // We use the pixel center of the "virtual probe".
     float2 probeCenter = (probeRelativePosition + 0.5) * spacing;
     
-    // Iterate BASE_RAYS (4)
-    for (int i = 0; i < BASE_RAYS; i++) {
+    // Iterate pc.baseRays
+    for (int i = 0; i < pc.baseRays; i++) {
         float index = baseIndex + float(i);
         float angle = (index + 0.5) * angleStep + noise;
         float2 rd = float2(cos(angle), sin(angle));
@@ -402,6 +398,19 @@ void main(uint3 DTid : SV_DispatchThreadID) {
         // Merge with Upper Cascade
         // Pass 'index' (absolute ray index) so merging finds the correct parent ray
         float4 merged = merge(rayRes, index, probeRelativePosition, sqrtBase, cascadeIndex);
+        
+        // Debug: Show Interval Rings
+        if (pc.showIntervals != 0) {
+            // Visualize active range (Green tint if ray ended within this cascade's valid range)
+            if (tHit >= rangeStart && tHit < rangeEnd) {
+                 merged.g += 0.2; 
+            }
+            // Visualize cascade boundaries (Red/Blue rings)
+            // We check if the distance is near the range boundary
+            // Since we don't have per-pixel linear distance, we use the tHit of the ray.
+            if (abs(tHit - rangeStart) < 1.0) merged.r += 0.5;
+            if (abs(tHit - rangeEnd) < 1.0) merged.b += 0.5;
+        }
         
         // Accumulate Average
         // We are averaging 4 rays.

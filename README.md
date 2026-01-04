@@ -35,6 +35,10 @@ A "Vampire Survival" style rogue-like game engine built to experiment with decou
 
 ![serverclient](docs/serverclient.gif)
 
+### [Radiance Cascades 2D](./VulkanCompute/radiance_cascades_2d)
+A real-time 2D Global Illumination renderer implemented in **Zig** and **Vulkan Compute** following https://jason.today/rc tutorial.
+
+![rc](docs/rc.gif)
 
 ## Author
 Nguyen Phi Hung

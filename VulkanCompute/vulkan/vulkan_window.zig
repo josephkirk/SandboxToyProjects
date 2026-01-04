@@ -84,6 +84,7 @@ pub const WindowContext = struct {
     mouse_y: i32 = 0,
     mouse_left: bool = false,
     mouse_right: bool = false,
+    mouse_middle: bool = false,
 
     // Keyboard State - tracks which key was pressed this frame (0 = none)
     key_pressed: u8 = 0,
@@ -597,6 +598,8 @@ pub const WindowContext = struct {
                 },
                 WM_LBUTTONDOWN => self.mouse_left = true,
                 WM_LBUTTONUP => self.mouse_left = false,
+                0x0207 => self.mouse_middle = true, // WM_MBUTTONDOWN
+                0x0208 => self.mouse_middle = false, // WM_MBUTTONUP
                 WM_RBUTTONDOWN => self.mouse_right = true,
                 WM_RBUTTONUP => self.mouse_right = false,
                 WM_KEYDOWN => {

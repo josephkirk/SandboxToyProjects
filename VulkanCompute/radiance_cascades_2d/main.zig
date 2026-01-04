@@ -95,7 +95,7 @@ const Obstacle = extern struct {
 const PushConstants = extern struct {
     level: i32, // Current cascade level (0 = base/direct)
     maxLevel: i32, // Total cascade levels
-    baseRays: i32, // Ray count at level 0 (doubles each level)
+    baseRays: i32, // Ray count per pixel (Constant 4 for Probe-Based RC)
     lightCount: i32, // Number of active lights
     obstacleCount: i32, // Number of active obstacles
     time: f32, // Animation time for temporal noise
@@ -103,6 +103,9 @@ const PushConstants = extern struct {
     stochasticMode: i32, // 0 = stable dither, 1 = temporal noise
     resolution: [2]f32, // Screen dimensions
     blendRadius: f32, // Metaball SDF blend radius
+    cascadeInterval: f32, // Scale of the 0th cascade interval (World Space)
+    rayInterval: f32, // Scale of ray travel distance
+    ringingFix: i32, // Toggle ringing reduction hack (1=On)
     padding1: f32 = 0.0,
 };
 
@@ -223,9 +226,9 @@ fn run_app() !void {
         // Unlike naive RC which downscales, Probe-Based RC uses "Spatial Dithering"
         // where higher levels trade spatial resolution for angular resolution.
         // - Level 0: 1024x1024 spatial, 1 ray/pixel.
-        // - Level 1: 512x512 spatial, 4 rays/pixel (packed as 2x2 blocks).
-        // - Level 2: 256x256 spatial, 16 rays/pixel (packed as 4x4 blocks).
-        // Total pixels remain constant (1024x1024) to store the data.
+        // - Level 1: 512x512 effective spatial, 4 rays/pixel (packed as 2x2 blocks).
+        // - Level 2: 256x256 effective spatial, 16 rays/pixel (packed as 4x4 blocks).
+        // The texture itself remains 1024x1024 to store this increased angular data.
         const img = try ctx.createStorageImageArray(ctx.width, ctx.height, 3, c.VK_FORMAT_R32G32B32A32_SFLOAT);
         try cascadesSH.append(allocator, img);
     }
@@ -387,17 +390,20 @@ fn run_app() !void {
     var brush_radius: f32 = 25.0;
     var light_radius: f32 = 50.0;
     var light_intensity: f32 = 1.0;
-    var light_falloff: f32 = 1.0;
+    const light_falloff: f32 = 1.0;
 
     // Shader Control State (exposed via ImGui)
     var stochastic_mode: bool = true;
     var blend_speed: f32 = 0.1;
-    var base_rays: i32 = 4;
+    const base_rays: i32 = 4; // Constant ray count per pixel (internally 4)
     var show_intervals: bool = false;
     var blend_radius: f32 = 100.0; // Metaball blend radius
     var display_debug_mode: i32 = 0; // 0=Normal, 1=L1x, 2=L1y, 3=Vector
-    var accum_iterations: i32 = 1; // Number of cascade+accumulate passes per frame
+    const accum_iterations: i32 = 1; // Base blend multiplier (unused loop count)
     var clear_requested: bool = false; // Flag to trigger history buffer clearing
+    var cascade_interval: f32 = 1.0;
+    var ray_interval: f32 = 1.0;
+    var ringing_fix: bool = true;
 
     // Color palette (indexed by 1-9 keys)
     const colors = [_][3]f32{
@@ -640,6 +646,43 @@ fn run_app() !void {
                     last_mouse_y = my;
                 }
             }
+        } else if (ctx.mouse_middle and !imgui_wants_mouse) {
+            // Middle Click: Erase
+            const erase_radius = brush_radius * 2.0; // Slightly larger for easier erasing
+            const erase_sq = erase_radius * erase_radius;
+            const mxf = @as(f32, @floatFromInt(mx));
+            const myf = @as(f32, @floatFromInt(my));
+
+            // Erase Lights
+            var l: usize = 0;
+            while (l < @as(usize, @intCast(lightCount))) {
+                const lp = lightSlice[l].pos;
+                const ddx = lp[0] - mxf;
+                const ddy = lp[1] - myf;
+                if (ddx * ddx + ddy * ddy < erase_sq) {
+                    // Remove by swap with last
+                    lightCount -= 1;
+                    lightSlice[l] = lightSlice[@intCast(lightCount)];
+                } else {
+                    l += 1;
+                }
+            }
+
+            // Erase Obstacles
+            var o: usize = 0;
+            while (o < @as(usize, @intCast(obstacleCount))) {
+                const op = obstacleSlice[o].pos;
+                const ddx = op[0] - mxf;
+                const ddy = op[1] - myf;
+                if (ddx * ddx + ddy * ddy < erase_sq) {
+                    obstacleCount -= 1;
+                    obstacleSlice[o] = obstacleSlice[@intCast(obstacleCount)];
+                } else {
+                    o += 1;
+                }
+            }
+            last_mouse_x = -1; // Reset drag consistency
+            last_mouse_y = -1;
         } else {
             last_mouse_x = -1;
             last_mouse_y = -1;
@@ -790,6 +833,9 @@ fn run_app() !void {
                 .showIntervals = if (show_intervals) 1 else 0,
                 .stochasticMode = if (stochastic_mode) 1 else 0,
                 .blendRadius = blend_radius,
+                .cascadeInterval = cascade_interval,
+                .rayInterval = ray_interval,
+                .ringingFix = if (ringing_fix) 1 else 0,
             };
 
             ctx.bindComputePipeline(cmdbuf, cascade_pipe);
@@ -880,17 +926,20 @@ fn run_app() !void {
             _ = imgui.sliderFloat("Brush Size", &brush_radius, 5.0, 100.0);
             _ = imgui.sliderFloat("Light Radius", &light_radius, 0.01, 300.0);
             _ = imgui.sliderFloat("Light Intensity", &light_intensity, 0.01, 10.0);
-            _ = imgui.sliderFloat("Light Falloff", &light_falloff, 0.1, 16.0);
             imgui.text("Colors (press 1-9 keys)");
+            imgui.text("Middle Click to Erase");
 
             imgui.text("");
             imgui.text("Rendering:");
             _ = imgui.checkbox("Stochastic Mode", &stochastic_mode);
             _ = imgui.sliderFloat("Blend Speed", &blend_speed, 0.001, 2.0);
-            _ = imgui.sliderInt("Accum Iterations", &accum_iterations, 1, 16);
-            _ = imgui.sliderInt("Base Rays", &base_rays, 1, 80);
             _ = imgui.checkbox("Show Intervals", &show_intervals);
-            _ = imgui.sliderFloat("GI Smoothness", &blend_radius, 50.0, 200.0);
+            _ = imgui.sliderFloat("Wall Metaball Radius", &blend_radius, 10.0, 200.0);
+
+            imgui.text("RC Parameter:");
+            _ = imgui.sliderFloat("Cascade Interval", &cascade_interval, 0.1, 10.0);
+            _ = imgui.sliderFloat("Ray Interval", &ray_interval, 0.1, 10.0);
+            _ = imgui.checkbox("Ringing Fix (Mod Hack)", &ringing_fix);
 
             imgui.text("");
             if (imgui.button("Clear Scene")) {
